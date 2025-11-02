@@ -1,13 +1,5 @@
-import { evaluate } from '@mastra/core/eval';
-import { registerHook, AvailableHooks } from '@mastra/core/hooks';
-import { TABLE_EVALS } from '@mastra/core/storage';
-import { scoreTraces, scoreTracesWorkflow } from '@mastra/core/scores/scoreTraces';
-import { generateEmptyFromSchema, checkEvalStorageFields } from '@mastra/core/utils';
-import { Mastra } from '@mastra/core/mastra';
-import { Agent, tryGenerateWithJsonFallback, tryStreamWithJsonFallback, MessageList, convertMessages } from '@mastra/core/agent';
-import { createTool, isVercelTool, Tool } from '@mastra/core/tools';
-import { z, ZodObject, ZodFirstPartyTypeKind } from 'zod';
-import crypto$1, { randomUUID } from 'crypto';
+import { M as MastraError, e as executeHook, c as createWorkflow, z, a as createStep, p as pMap, s as saveScorePayloadSchema, b as convertMessages, d as zodToJsonSchema$1, f as MastraBase, g as augmentWithInit, h as ModelRouterEmbeddingModel, i as deepMerge, j as MessageList, k as createWorkflow$1, l as createStep$1, A as Agent, m as createTool, t as tryGenerateWithJsonFallback, n as tryStreamWithJsonFallback, o as ModelRouterLanguageModel, q as generateEmptyFromSchema, Z as ZodObject, r as ZodFirstPartyTypeKind, u as toJSONSchema, v as safeParseAsync, w as ZodFirstPartyTypeKind$1, R as RuntimeContext, P as PROVIDER_REGISTRY, x as isVercelTool, T as Tool, y as Telemetry, B as getProviderConfig, E as ErrorCategory, C as ErrorDomain, D as ChunkFrom, F as getErrorFromUnknown, G as AISpanType, H as mastra, I as registerHook, J as AvailableHooks, K as checkEvalStorageFields } from './mastra.mjs';
+import require$$3, { randomUUID } from 'crypto';
 import { readdir, readFile, mkdtemp, rm, writeFile, mkdir, copyFile, stat } from 'fs/promises';
 import * as https from 'https';
 import { join as join$1 } from 'path/posix';
@@ -16,108 +8,492 @@ import { Http2ServerRequest } from 'http2';
 import { Readable, Writable } from 'stream';
 import { existsSync, readFileSync, createReadStream, lstatSync } from 'fs';
 import { join, resolve as resolve$2, dirname, extname, basename, isAbsolute, relative } from 'path';
-import { RuntimeContext } from '@mastra/core/runtime-context';
-import { Telemetry } from '@mastra/core/telemetry';
-import { MastraError, ErrorCategory, ErrorDomain, getErrorFromUnknown } from '@mastra/core/error';
-import { ModelRouterLanguageModel, PROVIDER_REGISTRY, getProviderConfig } from '@mastra/core/llm';
-import { ChunkFrom } from '@mastra/core/stream';
 import util, { promisify } from 'util';
 import { Buffer as Buffer$1 } from 'buffer';
-import { AISpanType } from '@mastra/core/ai-tracing';
-import { zodToJsonSchema as zodToJsonSchema$1 } from '@mastra/core/utils/zod-to-json';
-import { MastraA2AError } from '@mastra/core/a2a';
 import { TransformStream as TransformStream$1, ReadableStream as ReadableStream$1 } from 'stream/web';
-import { MastraMemory, MemoryProcessor } from '@mastra/core/memory';
-import * as z42 from 'zod/v4';
-import { z as z$1 } from 'zod/v4';
-import { ZodFirstPartyTypeKind as ZodFirstPartyTypeKind$1 } from 'zod/v3';
 import { spawn as spawn$1, execFile as execFile$1, exec as exec$1 } from 'child_process';
 import { createRequire } from 'module';
 import { tmpdir } from 'os';
-import { createWorkflow, createStep } from '@mastra/core/workflows';
 import { tools } from './tools.mjs';
+import 'events';
 
-const OPENROUTER_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions";
-const getExplainedQuoteByTopic = createTool({
-  id: "getExplainedQuoteByTopic",
-  description: "Fetches and explains a Bible verse based on a user's chosen topic (e.g., strength, hope).",
-  inputSchema: z.object({
-    topic: z.string().min(3, "Topic must be at least 3 characters long.").describe("The topic you want a verse about, e.g., 'strength' or 'hope'")
-  }),
-  outputSchema: z.object({
-    verse: z.string().optional(),
-    text: z.string().optional(),
-    explanation: z.string().optional(),
-    error: z.string().optional()
-  }),
-  // FINAL WORKING VERSION
-  execute: async (context) => {
-    const topic = (context?.context?.topic || "").toLowerCase().trim();
-    if (!topic) {
-      console.error("Could not find 'topic' at context.context.topic. The Playground structure may have changed.");
-      return { error: "Topic is missing from the input context." };
+// src/eval/evaluation.ts
+async function evaluate({
+  agentName,
+  input,
+  metric,
+  output,
+  runId,
+  globalRunId,
+  testInfo,
+  instructions
+}) {
+  const runIdToUse = runId || crypto.randomUUID();
+  let metricResult;
+  let metricName = metric.constructor.name;
+  try {
+    metricResult = await metric.measure(input.toString(), output);
+  } catch (e) {
+    throw new MastraError(
+      {
+        id: "EVAL_METRIC_MEASURE_EXECUTION_FAILED",
+        domain: "EVAL" /* EVAL */,
+        category: "USER" /* USER */,
+        details: {
+          agentName,
+          metricName,
+          globalRunId
+        }
+      },
+      e
+    );
+  }
+  const traceObject = {
+    input: input.toString(),
+    output,
+    result: metricResult,
+    agentName,
+    metricName,
+    instructions,
+    globalRunId,
+    runId: runIdToUse,
+    testInfo
+  };
+  try {
+    executeHook("onEvaluation" /* ON_EVALUATION */, traceObject);
+  } catch (e) {
+    throw new MastraError(
+      {
+        id: "EVAL_HOOK_EXECUTION_FAILED",
+        domain: "EVAL" /* EVAL */,
+        category: "USER" /* USER */,
+        details: {
+          agentName,
+          metricName,
+          globalRunId
+        }
+      },
+      e
+    );
+  }
+  return { ...metricResult, output };
+}
+
+// src/storage/constants.ts
+var TABLE_EVALS = "mastra_evals";
+
+// src/scores/scoreTraces/scoreTraces.ts
+async function scoreTraces({
+  scorerName,
+  targets,
+  mastra
+}) {
+  const workflow = mastra.__getInternalWorkflow("__batch-scoring-traces");
+  try {
+    const run = await workflow.createRunAsync();
+    await run.start({ inputData: { targets, scorerName } });
+  } catch (error) {
+    const mastraError = new MastraError(
+      {
+        category: "SYSTEM",
+        domain: "SCORER",
+        id: "MASTRA_SCORER_FAILED_TO_RUN_TRACE_SCORING",
+        details: {
+          scorerName,
+          targets: JSON.stringify(targets)
+        }
+      },
+      error
+    );
+    mastra.getLogger()?.trackException(mastraError);
+    mastra.getLogger()?.error(mastraError.toString());
+  }
+}
+
+// src/scores/scoreTraces/utils.ts
+function buildSpanTree(spans) {
+  const spanMap = /* @__PURE__ */ new Map();
+  const childrenMap = /* @__PURE__ */ new Map();
+  const rootSpans = [];
+  for (const span of spans) {
+    spanMap.set(span.spanId, span);
+  }
+  for (const span of spans) {
+    if (span.parentSpanId === null) {
+      rootSpans.push(span);
+    } else {
+      const siblings = childrenMap.get(span.parentSpanId) || [];
+      siblings.push(span);
+      childrenMap.set(span.parentSpanId, siblings);
     }
-    const topicMap = {
-      strength: "Philippians 4:13",
-      hope: "Jeremiah 29:11",
-      love: "1 Corinthians 13:4-7",
-      peace: "John 14:27",
-      faith: "Hebrews 11:1",
-      forgiveness: "Ephesians 4:32",
-      comfort: "2 Corinthians 1:3-4"
+  }
+  for (const children of childrenMap.values()) {
+    children.sort((a, b) => new Date(a.startedAt).getTime() - new Date(b.startedAt).getTime());
+  }
+  rootSpans.sort((a, b) => new Date(a.startedAt).getTime() - new Date(b.startedAt).getTime());
+  return { spanMap, childrenMap, rootSpans };
+}
+function getChildrenOfType(spanTree, parentSpanId, spanType) {
+  const children = spanTree.childrenMap.get(parentSpanId) || [];
+  return children.filter((span) => span.spanType === spanType);
+}
+function normalizeMessageContent(content) {
+  if (typeof content === "string") {
+    return content;
+  }
+  const tempMessage = {
+    id: "temp",
+    role: "user",
+    parts: content.map((part) => ({ type: part.type, text: part.text }))
+  };
+  const converted = convertMessages(tempMessage).to("AIV4.UI");
+  return converted[0]?.content || "";
+}
+function convertToUIMessage(message, createdAt) {
+  let messageInput;
+  if (typeof message.content === "string") {
+    messageInput = {
+      id: "temp",
+      role: message.role,
+      content: message.content
     };
-    const verseRef = topicMap[topic];
-    if (!verseRef) {
-      return { error: `Sorry, I don't have a verse for the topic "${topic}". Try 'strength', 'hope', or 'love'.` };
+  } else {
+    messageInput = {
+      id: "temp",
+      role: message.role,
+      parts: message.content.map((part) => ({ type: part.type, text: part.text }))
+    };
+  }
+  const converted = convertMessages(messageInput).to("AIV4.UI");
+  const result = converted[0];
+  if (!result) {
+    throw new Error("Failed to convert message");
+  }
+  return {
+    ...result,
+    id: "",
+    // Spans don't have message IDs
+    createdAt: new Date(createdAt)
+    // Use span timestamp
+  };
+}
+function extractInputMessages(agentSpan) {
+  const input = agentSpan.input;
+  if (typeof input === "string") {
+    return [
+      {
+        role: "user",
+        content: input,
+        createdAt: new Date(agentSpan.startedAt),
+        parts: [{ type: "text", text: input }],
+        experimental_attachments: []
+      }
+    ];
+  }
+  if (Array.isArray(input)) {
+    return input.map((msg) => convertToUIMessage(msg, agentSpan.startedAt));
+  }
+  if (input && typeof input === "object" && Array.isArray(input.messages)) {
+    return input.messages.map((msg) => convertToUIMessage(msg, agentSpan.startedAt));
+  }
+  return [];
+}
+function extractSystemMessages(llmSpan) {
+  return (llmSpan.input?.messages || []).filter((msg) => msg.role === "system").map((msg) => ({
+    role: "system",
+    content: normalizeMessageContent(msg.content)
+  }));
+}
+function extractRememberedMessages(llmSpan, currentInputContent) {
+  const messages = (llmSpan.input?.messages || []).filter((msg) => msg.role !== "system").filter((msg) => normalizeMessageContent(msg.content) !== currentInputContent);
+  return messages.map((msg) => convertToUIMessage(msg, llmSpan.startedAt));
+}
+function reconstructToolInvocations(spanTree, parentSpanId) {
+  const toolSpans = getChildrenOfType(spanTree, parentSpanId, "tool_call" /* TOOL_CALL */);
+  return toolSpans.map((toolSpan) => ({
+    state: "result",
+    toolName: toolSpan.attributes?.toolId,
+    args: toolSpan.input || {},
+    result: toolSpan.output || {}
+  }));
+}
+function createMessageParts(toolInvocations, textContent) {
+  const parts = [];
+  for (const toolInvocation of toolInvocations) {
+    parts.push({
+      type: "tool-invocation",
+      toolInvocation
+    });
+  }
+  if (textContent.trim()) {
+    parts.push({
+      type: "text",
+      text: textContent
+    });
+  }
+  return parts;
+}
+function validateTrace(trace) {
+  if (!trace) {
+    throw new Error("Trace is null or undefined");
+  }
+  if (!trace.spans || !Array.isArray(trace.spans)) {
+    throw new Error("Trace must have a spans array");
+  }
+  if (trace.spans.length === 0) {
+    throw new Error("Trace has no spans");
+  }
+  const spanIds = new Set(trace.spans.map((span) => span.spanId));
+  for (const span of trace.spans) {
+    if (span.parentSpanId && !spanIds.has(span.parentSpanId)) {
+      throw new Error(`Span ${span.spanId} references non-existent parent ${span.parentSpanId}`);
     }
-    try {
-      const quoteResponse = await fetch(`https://bible-api.com/${encodeURIComponent(verseRef)}`);
-      if (!quoteResponse.ok) throw new Error(`Bible API failed with status: ${quoteResponse.status}`);
-      const quoteData = await quoteResponse.json();
-      const verse = quoteData.reference;
-      const text = quoteData.text.trim();
-      const key = process.env.OPENROUTER_API_KEY;
-      if (!key) return { verse, text, explanation: "OpenRouter API key not configured." };
-      const prompt = `Explain this Bible verse briefly (1-3 sentences) in a clear, uplifting way:
+  }
+}
+function findPrimaryLLMSpan(spanTree, rootAgentSpan) {
+  const directLLMSpans = getChildrenOfType(spanTree, rootAgentSpan.spanId, "model_generation" /* MODEL_GENERATION */);
+  if (directLLMSpans.length > 0) {
+    return directLLMSpans[0];
+  }
+  throw new Error("No model generation span found in trace");
+}
+function prepareTraceForTransformation(trace) {
+  validateTrace(trace);
+  const spanTree = buildSpanTree(trace.spans);
+  const rootAgentSpan = spanTree.rootSpans.find((span) => span.spanType === "agent_run");
+  if (!rootAgentSpan) {
+    throw new Error("No root agent_run span found in trace");
+  }
+  return { spanTree, rootAgentSpan };
+}
+function transformTraceToScorerInputAndOutput(trace) {
+  const { spanTree, rootAgentSpan } = prepareTraceForTransformation(trace);
+  if (!rootAgentSpan.output) {
+    throw new Error("Root agent span has no output");
+  }
+  const primaryLLMSpan = findPrimaryLLMSpan(spanTree, rootAgentSpan);
+  const inputMessages = extractInputMessages(rootAgentSpan);
+  const systemMessages = extractSystemMessages(primaryLLMSpan);
+  const currentInputContent = inputMessages[0]?.content || "";
+  const rememberedMessages = extractRememberedMessages(primaryLLMSpan, currentInputContent);
+  const input = {
+    // We do not keep track of the tool call ids in traces, so we need to cast to UIMessageWithMetadata
+    inputMessages,
+    rememberedMessages,
+    systemMessages,
+    taggedSystemMessages: {}
+    // Todo: Support tagged system messages
+  };
+  const toolInvocations = reconstructToolInvocations(spanTree, rootAgentSpan.spanId);
+  const responseText = rootAgentSpan.output.text || "";
+  const responseMessage = {
+    role: "assistant",
+    content: responseText,
+    createdAt: new Date(rootAgentSpan.endedAt || rootAgentSpan.startedAt),
+    // @ts-ignore
+    parts: createMessageParts(toolInvocations, responseText),
+    experimental_attachments: [],
+    // Tool invocations are being deprecated however we need to support it for now
+    toolInvocations
+  };
+  const output = [responseMessage];
+  return {
+    input,
+    output
+  };
+}
 
-Verse: ${verse}
-Text: "${text}"`;
-      const llmResponse = await fetch(OPENROUTER_ENDPOINT, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
-        body: JSON.stringify({
-          model: "gpt-4o-mini",
-          messages: [{ role: "user", content: prompt }]
-        })
+// src/scores/scoreTraces/scoreTracesWorkflow.ts
+var getTraceStep = createStep({
+  id: "__process-trace-scoring",
+  inputSchema: z.object({
+    targets: z.array(
+      z.object({
+        traceId: z.string(),
+        spanId: z.string().optional()
+      })
+    ),
+    scorerName: z.string()
+  }),
+  outputSchema: z.any(),
+  execute: async ({ inputData, tracingContext, mastra }) => {
+    const logger = mastra.getLogger();
+    if (!logger) {
+      console.warn(
+        "[scoreTracesWorkflow] Logger not initialized: no debug or error logs will be recorded for scoring traces."
+      );
+    }
+    const storage = mastra.getStorage();
+    if (!storage) {
+      const mastraError = new MastraError({
+        id: "MASTRA_STORAGE_NOT_FOUND_FOR_TRACE_SCORING",
+        domain: "STORAGE" /* STORAGE */,
+        category: "SYSTEM" /* SYSTEM */,
+        text: "Storage not found for trace scoring",
+        details: {
+          scorerName: inputData.scorerName
+        }
       });
-      if (!llmResponse.ok) throw new Error(`LLM provider returned HTTP ${llmResponse.status}`);
-      const llmData = await llmResponse.json();
-      const explanation = llmData?.choices?.[0]?.message?.content?.trim() || "No explanation was generated.";
-      return { verse, text, explanation };
+      logger?.error(mastraError.toString());
+      logger?.trackException(mastraError);
+      return;
+    }
+    let scorer;
+    try {
+      scorer = mastra.getScorerByName(inputData.scorerName);
     } catch (error) {
-      console.error("Agent Error:", error.message);
-      return { error: error.message || "An unknown error occurred." };
+      const mastraError = new MastraError(
+        {
+          id: "MASTRA_SCORER_NOT_FOUND_FOR_TRACE_SCORING",
+          domain: "SCORER" /* SCORER */,
+          category: "SYSTEM" /* SYSTEM */,
+          text: `Scorer not found for trace scoring`,
+          details: {
+            scorerName: inputData.scorerName
+          }
+        },
+        error
+      );
+      logger?.error(mastraError.toString());
+      logger?.trackException(mastraError);
+      return;
+    }
+    await pMap(
+      inputData.targets,
+      async (target) => {
+        try {
+          await runScorerOnTarget({ storage, scorer, target, tracingContext });
+        } catch (error) {
+          const mastraError = new MastraError(
+            {
+              id: "MASTRA_SCORER_FAILED_TO_RUN_SCORER_ON_TRACE",
+              domain: "SCORER" /* SCORER */,
+              category: "SYSTEM" /* SYSTEM */,
+              details: {
+                scorerName: scorer.name,
+                spanId: target.spanId || "",
+                traceId: target.traceId
+              }
+            },
+            error
+          );
+          logger?.error(mastraError.toString());
+          logger?.trackException(mastraError);
+        }
+      },
+      { concurrency: 3 }
+    );
+  }
+});
+async function runScorerOnTarget({
+  storage,
+  scorer,
+  target,
+  tracingContext
+}) {
+  const trace = await storage.getAITrace(target.traceId);
+  if (!trace) {
+    throw new Error(`Trace not found for scoring, traceId: ${target.traceId}`);
+  }
+  let span;
+  if (target.spanId) {
+    span = trace.spans.find((span2) => span2.spanId === target.spanId);
+  } else {
+    span = trace.spans.find((span2) => span2.parentSpanId === null);
+  }
+  if (!span) {
+    throw new Error(
+      `Span not found for scoring, traceId: ${target.traceId}, spanId: ${target.spanId ?? "Not provided"}`
+    );
+  }
+  const scorerRun = buildScorerRun({
+    scorerType: scorer.type === "agent" ? "agent" : void 0,
+    tracingContext,
+    trace,
+    targetSpan: span
+  });
+  const result = await scorer.run(scorerRun);
+  const scorerResult = {
+    ...result,
+    scorer: {
+      id: scorer.name,
+      name: scorer.name,
+      description: scorer.description
+    },
+    traceId: target.traceId,
+    spanId: target.spanId,
+    entityId: span.name,
+    entityType: span.spanType,
+    entity: { traceId: span.traceId, spanId: span.spanId },
+    source: "TEST",
+    scorerId: scorer.name
+  };
+  const savedScoreRecord = await validateAndSaveScore({ storage, scorerResult });
+  await attachScoreToSpan({ storage, span, scoreRecord: savedScoreRecord });
+}
+async function validateAndSaveScore({ storage, scorerResult }) {
+  const payloadToSave = saveScorePayloadSchema.parse(scorerResult);
+  const result = await storage.saveScore(payloadToSave);
+  return result.score;
+}
+function buildScorerRun({
+  scorerType,
+  tracingContext,
+  trace,
+  targetSpan
+}) {
+  let runPayload;
+  if (scorerType === "agent") {
+    const { input, output } = transformTraceToScorerInputAndOutput(trace);
+    runPayload = {
+      input,
+      output
+    };
+  } else {
+    runPayload = { input: targetSpan.input, output: targetSpan.output };
+  }
+  runPayload.tracingContext = tracingContext;
+  return runPayload;
+}
+async function attachScoreToSpan({
+  storage,
+  span,
+  scoreRecord
+}) {
+  const existingLinks = span.links || [];
+  const link = {
+    type: "score",
+    scoreId: scoreRecord.id,
+    scorerName: scoreRecord.scorer.name,
+    score: scoreRecord.score,
+    createdAt: scoreRecord.createdAt
+  };
+  await storage.updateAISpan({
+    spanId: span.spanId,
+    traceId: span.traceId,
+    updates: { links: [...existingLinks, link] }
+  });
+}
+var scoreTracesWorkflow = createWorkflow({
+  id: "__batch-scoring-traces",
+  inputSchema: z.object({
+    targets: z.array(
+      z.object({
+        traceId: z.string(),
+        spanId: z.string().optional()
+      })
+    ),
+    scorerName: z.string()
+  }),
+  outputSchema: z.any(),
+  steps: [getTraceStep],
+  options: {
+    tracingPolicy: {
+      internal: 15 /* ALL */
     }
   }
 });
-const explainedQuoteAgent = new Agent({
-  id: "explainedQuoteAgent",
-  name: "Explained Quote Agent",
-  instructions: "A helpful AI agent that takes a topic from a user, finds a relevant Bible verse, and provides an explanation.",
-  model: {
-    providerId: "openrouter",
-    modelId: "gpt-4o-mini",
-    apiKey: process.env.OPENROUTER_API_KEY
-  },
-  tools: { getExplainedQuoteByTopic }
-});
-
-const mastra = new Mastra({
-  // minimal config; add provider/env as needed
-  agents: {
-    explainedQuoteAgent
-  }
-});
+scoreTracesWorkflow.then(getTraceStep).commit();
 
 // src/utils/mime.ts
 var getMimeType = (filename, mimes = baseMimes) => {
@@ -401,29 +777,6 @@ var compose = (middleware, onError, onNotFound) => {
       return context;
     }
   };
-};
-
-// src/http-exception.ts
-var HTTPException$1 = class HTTPException extends Error {
-  res;
-  status;
-  constructor(status = 500, options) {
-    super(options?.message, { cause: options?.cause });
-    this.res = options?.res;
-    this.status = status;
-  }
-  getResponse() {
-    if (this.res) {
-      const newResponse = new Response(this.res.body, {
-        status: this.status,
-        headers: this.res.headers
-      });
-      return newResponse;
-    }
-    return new Response(this.message, {
-      status: this.status
-    });
-  }
 };
 
 // src/request/constants.ts
@@ -1978,6 +2331,29 @@ var logger = (fn = console.log) => {
   };
 };
 
+// src/http-exception.ts
+var HTTPException$1 = class HTTPException extends Error {
+  res;
+  status;
+  constructor(status = 500, options) {
+    super(options?.message, { cause: options?.cause });
+    this.res = options?.res;
+    this.status = status;
+  }
+  getResponse() {
+    if (this.res) {
+      const newResponse = new Response(this.res.body, {
+        status: this.status,
+        headers: this.res.headers
+      });
+      return newResponse;
+    }
+    return new Response(this.message, {
+      status: this.status
+    });
+  }
+};
+
 // src/middleware/timeout/index.ts
 var defaultTimeoutException = new HTTPException$1(504, {
   message: "Gateway Timeout"
@@ -2928,6 +3304,73 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
   __defProp$1(target, "default", { value: mod, enumerable: true }) ,
   mod
 ));
+
+// src/a2a/types.ts
+var ErrorCodeParseError = -32700;
+var ErrorCodeInvalidRequest = -32600;
+var ErrorCodeMethodNotFound = -32601;
+var ErrorCodeInvalidParams = -32602;
+var ErrorCodeInternalError = -32603;
+var ErrorCodeTaskNotFound = -32001;
+var ErrorCodeTaskNotCancelable = -32002;
+var ErrorCodePushNotificationNotSupported = -32003;
+var ErrorCodeUnsupportedOperation = -32004;
+
+// src/a2a/error.ts
+var MastraA2AError = class _MastraA2AError extends Error {
+  code;
+  data;
+  taskId;
+  // Optional task ID context
+  constructor(code, message, data, taskId) {
+    super(message);
+    this.name = "MastraA2AError";
+    this.code = code;
+    this.data = data;
+    this.taskId = taskId;
+  }
+  /**
+   * Formats the error into a standard JSON-RPC error object structure.
+   */
+  toJSONRPCError() {
+    const errorObject = {
+      code: this.code,
+      message: this.message
+    };
+    if (this.data !== void 0) {
+      errorObject.data = this.data;
+    }
+    return errorObject;
+  }
+  // Static factory methods for common errors
+  static parseError(message, data) {
+    return new _MastraA2AError(ErrorCodeParseError, message, data);
+  }
+  static invalidRequest(message, data) {
+    return new _MastraA2AError(ErrorCodeInvalidRequest, message, data);
+  }
+  static methodNotFound(method) {
+    return new _MastraA2AError(ErrorCodeMethodNotFound, `Method not found: ${method}`);
+  }
+  static invalidParams(message, data) {
+    return new _MastraA2AError(ErrorCodeInvalidParams, message, data);
+  }
+  static internalError(message, data) {
+    return new _MastraA2AError(ErrorCodeInternalError, message, data);
+  }
+  static taskNotFound(taskId) {
+    return new _MastraA2AError(ErrorCodeTaskNotFound, `Task not found: ${taskId}`, void 0, taskId);
+  }
+  static taskNotCancelable(taskId) {
+    return new _MastraA2AError(ErrorCodeTaskNotCancelable, `Task not cancelable: ${taskId}`, void 0, taskId);
+  }
+  static pushNotificationNotSupported() {
+    return new _MastraA2AError(ErrorCodePushNotificationNotSupported, "Push Notification is not supported");
+  }
+  static unsupportedOperation(operation) {
+    return new _MastraA2AError(ErrorCodeUnsupportedOperation, `Unsupported operation: ${operation}`);
+  }
+};
 
 // src/server/handlers/a2a.ts
 var a2a_exports = {};
@@ -8111,6 +8554,264 @@ var openai = createOpenAI({
   compatibility: "strict"
   // strict for OpenAI API
 });
+
+// src/memory/memory.ts
+var MemoryProcessor = class extends MastraBase {
+  /**
+   * Process a list of messages and return a filtered or transformed list.
+   * @param messages The messages to process
+   * @returns The processed messages
+   */
+  process(messages, _opts) {
+    return messages;
+  }
+};
+var memoryDefaultOptions = {
+  lastMessages: 10,
+  semanticRecall: false,
+  threads: {
+    generateTitle: true
+  },
+  workingMemory: {
+    enabled: false,
+    template: `
+# User Information
+- **First Name**: 
+- **Last Name**: 
+- **Location**: 
+- **Occupation**: 
+- **Interests**: 
+- **Goals**: 
+- **Events**: 
+- **Facts**: 
+- **Projects**: 
+`
+  }
+};
+var MastraMemory = class extends MastraBase {
+  MAX_CONTEXT_TOKENS;
+  _storage;
+  vector;
+  embedder;
+  processors = [];
+  threadConfig = { ...memoryDefaultOptions };
+  #mastra;
+  constructor(config) {
+    super({ component: "MEMORY", name: config.name });
+    if (config.options) this.threadConfig = this.getMergedThreadConfig(config.options);
+    if (config.processors) this.processors = config.processors;
+    if (config.storage) {
+      this._storage = augmentWithInit(config.storage);
+      this._hasOwnStorage = true;
+    }
+    if (this.threadConfig.semanticRecall) {
+      if (!config.vector) {
+        throw new Error(
+          `Semantic recall requires a vector store to be configured.
+
+https://mastra.ai/en/docs/memory/semantic-recall`
+        );
+      }
+      this.vector = config.vector;
+      if (!config.embedder) {
+        throw new Error(
+          `Semantic recall requires an embedder to be configured.
+
+https://mastra.ai/en/docs/memory/semantic-recall`
+        );
+      }
+      if (typeof config.embedder === "string") {
+        this.embedder = new ModelRouterEmbeddingModel(config.embedder);
+      } else {
+        this.embedder = config.embedder;
+      }
+    }
+  }
+  /**
+   * Internal method used by Mastra to register itself with the memory.
+   * @param mastra The Mastra instance.
+   * @internal
+   */
+  __registerMastra(mastra) {
+    this.#mastra = mastra;
+  }
+  _hasOwnStorage = false;
+  get hasOwnStorage() {
+    return this._hasOwnStorage;
+  }
+  get storage() {
+    if (!this._storage) {
+      throw new Error(
+        `Memory requires a storage provider to function. Add a storage configuration to Memory or to your Mastra instance.
+
+https://mastra.ai/en/docs/memory/overview`
+      );
+    }
+    return this._storage;
+  }
+  setStorage(storage) {
+    this._storage = augmentWithInit(storage);
+  }
+  setVector(vector) {
+    this.vector = vector;
+  }
+  setEmbedder(embedder) {
+    this.embedder = embedder;
+  }
+  /**
+   * Get a system message to inject into the conversation.
+   * This will be called before each conversation turn.
+   * Implementations can override this to inject custom system messages.
+   */
+  async getSystemMessage(_input) {
+    return null;
+  }
+  /**
+   * Get tools that should be available to the agent.
+   * This will be called when converting tools for the agent.
+   * Implementations can override this to provide additional tools.
+   */
+  getTools(_config) {
+    return {};
+  }
+  async createEmbeddingIndex(dimensions, config) {
+    const defaultDimensions = 1536;
+    const isDefault = dimensions === defaultDimensions;
+    const usedDimensions = dimensions ?? defaultDimensions;
+    const separator = this.vector?.indexSeparator ?? "_";
+    const indexName = isDefault ? `memory${separator}messages` : `memory${separator}messages${separator}${usedDimensions}`;
+    if (typeof this.vector === `undefined`) {
+      throw new Error(`Tried to create embedding index but no vector db is attached to this Memory instance.`);
+    }
+    const semanticConfig = typeof config?.semanticRecall === "object" ? config.semanticRecall : void 0;
+    const indexConfig = semanticConfig?.indexConfig;
+    const createParams = {
+      indexName,
+      dimension: usedDimensions,
+      ...indexConfig?.metric && { metric: indexConfig.metric }
+    };
+    if (indexConfig && (indexConfig.type || indexConfig.ivf || indexConfig.hnsw)) {
+      createParams.indexConfig = {};
+      if (indexConfig.type) createParams.indexConfig.type = indexConfig.type;
+      if (indexConfig.ivf) createParams.indexConfig.ivf = indexConfig.ivf;
+      if (indexConfig.hnsw) createParams.indexConfig.hnsw = indexConfig.hnsw;
+    }
+    await this.vector.createIndex(createParams);
+    return { indexName };
+  }
+  getMergedThreadConfig(config) {
+    if (config?.workingMemory && "use" in config.workingMemory) {
+      throw new Error("The workingMemory.use option has been removed. Working memory always uses tool-call mode.");
+    }
+    const mergedConfig = deepMerge(this.threadConfig, config || {});
+    if (config?.workingMemory?.schema) {
+      if (mergedConfig.workingMemory) {
+        mergedConfig.workingMemory.schema = config.workingMemory.schema;
+      }
+    }
+    return mergedConfig;
+  }
+  /**
+   * Apply all configured message processors to a list of messages.
+   * @param messages The messages to process
+   * @returns The processed messages
+   */
+  async applyProcessors(messages, opts) {
+    const processors = opts.processors || this.processors;
+    if (!processors || processors.length === 0) {
+      return messages;
+    }
+    let processedMessages = [...messages];
+    for (const processor of processors) {
+      processedMessages = await processor.process(processedMessages, {
+        systemMessage: opts.systemMessage,
+        newMessages: opts.newMessages,
+        memorySystemMessage: opts.memorySystemMessage
+      });
+    }
+    return processedMessages;
+  }
+  processMessages({
+    messages,
+    processors,
+    ...opts
+  }) {
+    return this.applyProcessors(messages, { processors: processors || this.processors, ...opts });
+  }
+  estimateTokens(text) {
+    return Math.ceil(text.split(" ").length * 1.3);
+  }
+  /**
+   * Helper method to create a new thread
+   * @param title - Optional title for the thread
+   * @param metadata - Optional metadata for the thread
+   * @returns Promise resolving to the created thread
+   */
+  async createThread({
+    threadId,
+    resourceId,
+    title,
+    metadata,
+    memoryConfig,
+    saveThread = true
+  }) {
+    const thread = {
+      id: threadId || this.generateId(),
+      title: title || `New Thread ${(/* @__PURE__ */ new Date()).toISOString()}`,
+      resourceId,
+      createdAt: /* @__PURE__ */ new Date(),
+      updatedAt: /* @__PURE__ */ new Date(),
+      metadata
+    };
+    return saveThread ? this.saveThread({ thread, memoryConfig }) : thread;
+  }
+  /**
+   * Helper method to add a single message to a thread
+   * @param threadId - The thread to add the message to
+   * @param content - The message content
+   * @param role - The role of the message sender
+   * @param type - The type of the message
+   * @param toolNames - Optional array of tool names that were called
+   * @param toolCallArgs - Optional array of tool call arguments
+   * @param toolCallIds - Optional array of tool call ids
+   * @returns Promise resolving to the saved message
+   * @deprecated use saveMessages instead
+   */
+  async addMessage({
+    threadId,
+    resourceId,
+    config,
+    content,
+    role,
+    type,
+    toolNames,
+    toolCallArgs,
+    toolCallIds
+  }) {
+    const message = {
+      id: this.generateId(),
+      content,
+      role,
+      createdAt: /* @__PURE__ */ new Date(),
+      threadId,
+      resourceId,
+      type,
+      toolNames,
+      toolCallArgs,
+      toolCallIds
+    };
+    const savedMessages = await this.saveMessages({ messages: [message], memoryConfig: config });
+    const list = new MessageList({ threadId, resourceId }).add(savedMessages[0], "memory");
+    return list.get.all.v1()[0];
+  }
+  /**
+   * Generates a unique identifier
+   * @returns A unique string ID
+   */
+  generateId() {
+    return this.#mastra?.generateId() || crypto.randomUUID();
+  }
+};
 
 // ../../node_modules/.pnpm/@vercel+oidc@3.0.3/node_modules/@vercel/oidc/dist/get-context.js
 var require_get_context = __commonJS({
@@ -14683,14 +15384,14 @@ function zod3Schema(zodSchema22, options) {
 function zod4Schema(zodSchema22, options) {
   var _a21;
   const useReferences = (_a21 = void 0 ) != null ? _a21 : false;
-  const z4JSONSchema = z42.toJSONSchema(zodSchema22, {
+  const z4JSONSchema = toJSONSchema(zodSchema22, {
     target: "draft-7",
     io: "output",
     reused: useReferences ? "ref" : "inline"
   });
   return jsonSchema2(z4JSONSchema, {
     validate: async (value) => {
-      const result = await z42.safeParseAsync(zodSchema22, value);
+      const result = await safeParseAsync(zodSchema22, value);
       return result.success ? { success: true, value: result.data } : { success: false, error: result.error };
     }
   });
@@ -14870,8 +15571,8 @@ var GatewayRateLimitError = class extends (_b4 = GatewayError, _a43 = symbol43, 
 var name43 = "GatewayModelNotFoundError";
 var marker53 = `vercel.ai.gateway.error.${name43}`;
 var symbol53 = Symbol.for(marker53);
-var modelNotFoundParamSchema = z$1.object({
-  modelId: z$1.string()
+var modelNotFoundParamSchema = z.object({
+  modelId: z.string()
 });
 var _a53;
 var _b5;
@@ -14985,12 +15686,12 @@ function createGatewayErrorFromResponse({
       return new GatewayInternalServerError({ message, statusCode, cause });
   }
 }
-var gatewayErrorResponseSchema = z$1.object({
-  error: z$1.object({
-    message: z$1.string(),
-    type: z$1.string().nullish(),
-    param: z$1.unknown().nullish(),
-    code: z$1.union([z$1.string(), z$1.number()]).nullish()
+var gatewayErrorResponseSchema = z.object({
+  error: z.object({
+    message: z.string(),
+    type: z.string().nullish(),
+    param: z.unknown().nullish(),
+    code: z.union([z.string(), z.number()]).nullish()
   })
 });
 function asGatewayError(error, authMethod) {
@@ -15035,9 +15736,9 @@ function parseAuthMethod(headers) {
   );
   return result.success ? result.data : void 0;
 }
-var gatewayAuthMethodSchema = z$1.union([
-  z$1.literal("api-key"),
-  z$1.literal("oidc")
+var gatewayAuthMethodSchema = z.union([
+  z.literal("api-key"),
+  z.literal("oidc")
 ]);
 var GatewayFetchMetadata = class {
   constructor(config) {
@@ -15052,7 +15753,7 @@ var GatewayFetchMetadata = class {
           gatewayFetchMetadataSchema
         ),
         failedResponseHandler: createJsonErrorResponseHandler({
-          errorSchema: z$1.any(),
+          errorSchema: z.any(),
           errorToMessage: (data) => data
         }),
         fetch: this.config.fetch
@@ -15070,7 +15771,7 @@ var GatewayFetchMetadata = class {
         headers: await resolve(this.config.headers()),
         successfulResponseHandler: createJsonResponseHandler(gatewayCreditsSchema),
         failedResponseHandler: createJsonErrorResponseHandler({
-          errorSchema: z$1.any(),
+          errorSchema: z.any(),
           errorToMessage: (data) => data
         }),
         fetch: this.config.fetch
@@ -15081,36 +15782,36 @@ var GatewayFetchMetadata = class {
     }
   }
 };
-var gatewayLanguageModelSpecificationSchema = z$1.object({
-  specificationVersion: z$1.literal("v2"),
-  provider: z$1.string(),
-  modelId: z$1.string()
+var gatewayLanguageModelSpecificationSchema = z.object({
+  specificationVersion: z.literal("v2"),
+  provider: z.string(),
+  modelId: z.string()
 });
-var gatewayLanguageModelPricingSchema = z$1.object({
-  input: z$1.string(),
-  output: z$1.string(),
-  input_cache_read: z$1.string().nullish(),
-  input_cache_write: z$1.string().nullish()
+var gatewayLanguageModelPricingSchema = z.object({
+  input: z.string(),
+  output: z.string(),
+  input_cache_read: z.string().nullish(),
+  input_cache_write: z.string().nullish()
 }).transform(({ input, output, input_cache_read, input_cache_write }) => ({
   input,
   output,
   ...input_cache_read ? { cachedInputTokens: input_cache_read } : {},
   ...input_cache_write ? { cacheCreationInputTokens: input_cache_write } : {}
 }));
-var gatewayLanguageModelEntrySchema = z$1.object({
-  id: z$1.string(),
-  name: z$1.string(),
-  description: z$1.string().nullish(),
+var gatewayLanguageModelEntrySchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  description: z.string().nullish(),
   pricing: gatewayLanguageModelPricingSchema.nullish(),
   specification: gatewayLanguageModelSpecificationSchema,
-  modelType: z$1.enum(["language", "embedding", "image"]).nullish()
+  modelType: z.enum(["language", "embedding", "image"]).nullish()
 });
-var gatewayFetchMetadataSchema = z$1.object({
-  models: z$1.array(gatewayLanguageModelEntrySchema)
+var gatewayFetchMetadataSchema = z.object({
+  models: z.array(gatewayLanguageModelEntrySchema)
 });
-var gatewayCreditsSchema = z$1.object({
-  balance: z$1.string(),
-  total_used: z$1.string()
+var gatewayCreditsSchema = z.object({
+  balance: z.string(),
+  total_used: z.string()
 }).transform(({ balance, total_used }) => ({
   balance,
   totalUsed: total_used
@@ -15150,9 +15851,9 @@ var GatewayLanguageModel = class {
           await resolve(this.config.o11yHeaders)
         ),
         body: args,
-        successfulResponseHandler: createJsonResponseHandler(z$1.any()),
+        successfulResponseHandler: createJsonResponseHandler(z.any()),
         failedResponseHandler: createJsonErrorResponseHandler({
-          errorSchema: z$1.any(),
+          errorSchema: z.any(),
           errorToMessage: (data) => data
         }),
         ...abortSignal && { abortSignal },
@@ -15182,9 +15883,9 @@ var GatewayLanguageModel = class {
           await resolve(this.config.o11yHeaders)
         ),
         body: args,
-        successfulResponseHandler: createEventSourceResponseHandler(z$1.any()),
+        successfulResponseHandler: createEventSourceResponseHandler(z.any()),
         failedResponseHandler: createJsonErrorResponseHandler({
-          errorSchema: z$1.any(),
+          errorSchema: z.any(),
           errorToMessage: (data) => data
         }),
         ...abortSignal && { abortSignal },
@@ -15300,7 +16001,7 @@ var GatewayEmbeddingModel = class {
           gatewayEmbeddingResponseSchema
         ),
         failedResponseHandler: createJsonErrorResponseHandler({
-          errorSchema: z$1.any(),
+          errorSchema: z.any(),
           errorToMessage: (data) => data
         }),
         ...abortSignal && { abortSignal },
@@ -15326,10 +16027,10 @@ var GatewayEmbeddingModel = class {
     };
   }
 };
-var gatewayEmbeddingResponseSchema = z$1.object({
-  embeddings: z$1.array(z$1.array(z$1.number())),
-  usage: z$1.object({ tokens: z$1.number() }).nullish(),
-  providerMetadata: z$1.record(z$1.string(), z$1.record(z$1.string(), z$1.unknown())).optional()
+var gatewayEmbeddingResponseSchema = z.object({
+  embeddings: z.array(z.array(z.number())),
+  usage: z.object({ tokens: z.number() }).nullish(),
+  providerMetadata: z.record(z.string(), z.record(z.string(), z.unknown())).optional()
 });
 async function getVercelRequestId() {
   var _a85;
@@ -15574,11 +16275,11 @@ function getGlobalProvider() {
   return (_a172 = globalThis.AI_SDK_DEFAULT_PROVIDER) != null ? _a172 : gateway;
 }
 var VERSION4 = "5.0.60" ;
-var dataContentSchema2 = z$1.union([
-  z$1.string(),
-  z$1.instanceof(Uint8Array),
-  z$1.instanceof(ArrayBuffer),
-  z$1.custom(
+var dataContentSchema2 = z.union([
+  z.string(),
+  z.instanceof(Uint8Array),
+  z.instanceof(ArrayBuffer),
+  z.custom(
     // Buffer might not be available in some environments such as CloudFlare:
     (value) => {
       var _a172, _b8;
@@ -15587,113 +16288,113 @@ var dataContentSchema2 = z$1.union([
     { message: "Must be a Buffer" }
   )
 ]);
-var jsonValueSchema2 = z$1.lazy(
-  () => z$1.union([
-    z$1.null(),
-    z$1.string(),
-    z$1.number(),
-    z$1.boolean(),
-    z$1.record(z$1.string(), jsonValueSchema2),
-    z$1.array(jsonValueSchema2)
+var jsonValueSchema2 = z.lazy(
+  () => z.union([
+    z.null(),
+    z.string(),
+    z.number(),
+    z.boolean(),
+    z.record(z.string(), jsonValueSchema2),
+    z.array(jsonValueSchema2)
   ])
 );
-var providerMetadataSchema2 = z$1.record(
-  z$1.string(),
-  z$1.record(z$1.string(), jsonValueSchema2)
+var providerMetadataSchema2 = z.record(
+  z.string(),
+  z.record(z.string(), jsonValueSchema2)
 );
-var textPartSchema2 = z$1.object({
-  type: z$1.literal("text"),
-  text: z$1.string(),
+var textPartSchema2 = z.object({
+  type: z.literal("text"),
+  text: z.string(),
   providerOptions: providerMetadataSchema2.optional()
 });
-var imagePartSchema2 = z$1.object({
-  type: z$1.literal("image"),
-  image: z$1.union([dataContentSchema2, z$1.instanceof(URL)]),
-  mediaType: z$1.string().optional(),
+var imagePartSchema2 = z.object({
+  type: z.literal("image"),
+  image: z.union([dataContentSchema2, z.instanceof(URL)]),
+  mediaType: z.string().optional(),
   providerOptions: providerMetadataSchema2.optional()
 });
-var filePartSchema2 = z$1.object({
-  type: z$1.literal("file"),
-  data: z$1.union([dataContentSchema2, z$1.instanceof(URL)]),
-  filename: z$1.string().optional(),
-  mediaType: z$1.string(),
+var filePartSchema2 = z.object({
+  type: z.literal("file"),
+  data: z.union([dataContentSchema2, z.instanceof(URL)]),
+  filename: z.string().optional(),
+  mediaType: z.string(),
   providerOptions: providerMetadataSchema2.optional()
 });
-var reasoningPartSchema2 = z$1.object({
-  type: z$1.literal("reasoning"),
-  text: z$1.string(),
+var reasoningPartSchema2 = z.object({
+  type: z.literal("reasoning"),
+  text: z.string(),
   providerOptions: providerMetadataSchema2.optional()
 });
-var toolCallPartSchema2 = z$1.object({
-  type: z$1.literal("tool-call"),
-  toolCallId: z$1.string(),
-  toolName: z$1.string(),
-  input: z$1.unknown(),
+var toolCallPartSchema2 = z.object({
+  type: z.literal("tool-call"),
+  toolCallId: z.string(),
+  toolName: z.string(),
+  input: z.unknown(),
   providerOptions: providerMetadataSchema2.optional(),
-  providerExecuted: z$1.boolean().optional()
+  providerExecuted: z.boolean().optional()
 });
-var outputSchema = z$1.discriminatedUnion("type", [
-  z$1.object({
-    type: z$1.literal("text"),
-    value: z$1.string()
+var outputSchema = z.discriminatedUnion("type", [
+  z.object({
+    type: z.literal("text"),
+    value: z.string()
   }),
-  z$1.object({
-    type: z$1.literal("json"),
+  z.object({
+    type: z.literal("json"),
     value: jsonValueSchema2
   }),
-  z$1.object({
-    type: z$1.literal("error-text"),
-    value: z$1.string()
+  z.object({
+    type: z.literal("error-text"),
+    value: z.string()
   }),
-  z$1.object({
-    type: z$1.literal("error-json"),
+  z.object({
+    type: z.literal("error-json"),
     value: jsonValueSchema2
   }),
-  z$1.object({
-    type: z$1.literal("content"),
-    value: z$1.array(
-      z$1.union([
-        z$1.object({
-          type: z$1.literal("text"),
-          text: z$1.string()
+  z.object({
+    type: z.literal("content"),
+    value: z.array(
+      z.union([
+        z.object({
+          type: z.literal("text"),
+          text: z.string()
         }),
-        z$1.object({
-          type: z$1.literal("media"),
-          data: z$1.string(),
-          mediaType: z$1.string()
+        z.object({
+          type: z.literal("media"),
+          data: z.string(),
+          mediaType: z.string()
         })
       ])
     )
   })
 ]);
-var toolResultPartSchema2 = z$1.object({
-  type: z$1.literal("tool-result"),
-  toolCallId: z$1.string(),
-  toolName: z$1.string(),
+var toolResultPartSchema2 = z.object({
+  type: z.literal("tool-result"),
+  toolCallId: z.string(),
+  toolName: z.string(),
   output: outputSchema,
   providerOptions: providerMetadataSchema2.optional()
 });
-var systemModelMessageSchema = z$1.object(
+var systemModelMessageSchema = z.object(
   {
-    role: z$1.literal("system"),
-    content: z$1.string(),
+    role: z.literal("system"),
+    content: z.string(),
     providerOptions: providerMetadataSchema2.optional()
   }
 );
-var userModelMessageSchema = z$1.object({
-  role: z$1.literal("user"),
-  content: z$1.union([
-    z$1.string(),
-    z$1.array(z$1.union([textPartSchema2, imagePartSchema2, filePartSchema2]))
+var userModelMessageSchema = z.object({
+  role: z.literal("user"),
+  content: z.union([
+    z.string(),
+    z.array(z.union([textPartSchema2, imagePartSchema2, filePartSchema2]))
   ]),
   providerOptions: providerMetadataSchema2.optional()
 });
-var assistantModelMessageSchema = z$1.object({
-  role: z$1.literal("assistant"),
-  content: z$1.union([
-    z$1.string(),
-    z$1.array(
-      z$1.union([
+var assistantModelMessageSchema = z.object({
+  role: z.literal("assistant"),
+  content: z.union([
+    z.string(),
+    z.array(
+      z.union([
         textPartSchema2,
         filePartSchema2,
         reasoningPartSchema2,
@@ -15704,12 +16405,12 @@ var assistantModelMessageSchema = z$1.object({
   ]),
   providerOptions: providerMetadataSchema2.optional()
 });
-var toolModelMessageSchema = z$1.object({
-  role: z$1.literal("tool"),
-  content: z$1.array(toolResultPartSchema2),
+var toolModelMessageSchema = z.object({
+  role: z.literal("tool"),
+  content: z.array(toolResultPartSchema2),
   providerOptions: providerMetadataSchema2.optional()
 });
-z$1.union([
+z.union([
   systemModelMessageSchema,
   userModelMessageSchema,
   assistantModelMessageSchema,
@@ -16022,140 +16723,140 @@ createIdGenerator2({
   prefix: "aitxt",
   size: 24
 });
-z$1.union([
-  z$1.strictObject({
-    type: z$1.literal("text-start"),
-    id: z$1.string(),
+z.union([
+  z.strictObject({
+    type: z.literal("text-start"),
+    id: z.string(),
     providerMetadata: providerMetadataSchema2.optional()
   }),
-  z$1.strictObject({
-    type: z$1.literal("text-delta"),
-    id: z$1.string(),
-    delta: z$1.string(),
+  z.strictObject({
+    type: z.literal("text-delta"),
+    id: z.string(),
+    delta: z.string(),
     providerMetadata: providerMetadataSchema2.optional()
   }),
-  z$1.strictObject({
-    type: z$1.literal("text-end"),
-    id: z$1.string(),
+  z.strictObject({
+    type: z.literal("text-end"),
+    id: z.string(),
     providerMetadata: providerMetadataSchema2.optional()
   }),
-  z$1.strictObject({
-    type: z$1.literal("error"),
-    errorText: z$1.string()
+  z.strictObject({
+    type: z.literal("error"),
+    errorText: z.string()
   }),
-  z$1.strictObject({
-    type: z$1.literal("tool-input-start"),
-    toolCallId: z$1.string(),
-    toolName: z$1.string(),
-    providerExecuted: z$1.boolean().optional(),
-    dynamic: z$1.boolean().optional()
+  z.strictObject({
+    type: z.literal("tool-input-start"),
+    toolCallId: z.string(),
+    toolName: z.string(),
+    providerExecuted: z.boolean().optional(),
+    dynamic: z.boolean().optional()
   }),
-  z$1.strictObject({
-    type: z$1.literal("tool-input-delta"),
-    toolCallId: z$1.string(),
-    inputTextDelta: z$1.string()
+  z.strictObject({
+    type: z.literal("tool-input-delta"),
+    toolCallId: z.string(),
+    inputTextDelta: z.string()
   }),
-  z$1.strictObject({
-    type: z$1.literal("tool-input-available"),
-    toolCallId: z$1.string(),
-    toolName: z$1.string(),
-    input: z$1.unknown(),
-    providerExecuted: z$1.boolean().optional(),
+  z.strictObject({
+    type: z.literal("tool-input-available"),
+    toolCallId: z.string(),
+    toolName: z.string(),
+    input: z.unknown(),
+    providerExecuted: z.boolean().optional(),
     providerMetadata: providerMetadataSchema2.optional(),
-    dynamic: z$1.boolean().optional()
+    dynamic: z.boolean().optional()
   }),
-  z$1.strictObject({
-    type: z$1.literal("tool-input-error"),
-    toolCallId: z$1.string(),
-    toolName: z$1.string(),
-    input: z$1.unknown(),
-    providerExecuted: z$1.boolean().optional(),
+  z.strictObject({
+    type: z.literal("tool-input-error"),
+    toolCallId: z.string(),
+    toolName: z.string(),
+    input: z.unknown(),
+    providerExecuted: z.boolean().optional(),
     providerMetadata: providerMetadataSchema2.optional(),
-    dynamic: z$1.boolean().optional(),
-    errorText: z$1.string()
+    dynamic: z.boolean().optional(),
+    errorText: z.string()
   }),
-  z$1.strictObject({
-    type: z$1.literal("tool-output-available"),
-    toolCallId: z$1.string(),
-    output: z$1.unknown(),
-    providerExecuted: z$1.boolean().optional(),
-    dynamic: z$1.boolean().optional(),
-    preliminary: z$1.boolean().optional()
+  z.strictObject({
+    type: z.literal("tool-output-available"),
+    toolCallId: z.string(),
+    output: z.unknown(),
+    providerExecuted: z.boolean().optional(),
+    dynamic: z.boolean().optional(),
+    preliminary: z.boolean().optional()
   }),
-  z$1.strictObject({
-    type: z$1.literal("tool-output-error"),
-    toolCallId: z$1.string(),
-    errorText: z$1.string(),
-    providerExecuted: z$1.boolean().optional(),
-    dynamic: z$1.boolean().optional()
+  z.strictObject({
+    type: z.literal("tool-output-error"),
+    toolCallId: z.string(),
+    errorText: z.string(),
+    providerExecuted: z.boolean().optional(),
+    dynamic: z.boolean().optional()
   }),
-  z$1.strictObject({
-    type: z$1.literal("reasoning-start"),
-    id: z$1.string(),
+  z.strictObject({
+    type: z.literal("reasoning-start"),
+    id: z.string(),
     providerMetadata: providerMetadataSchema2.optional()
   }),
-  z$1.strictObject({
-    type: z$1.literal("reasoning-delta"),
-    id: z$1.string(),
-    delta: z$1.string(),
+  z.strictObject({
+    type: z.literal("reasoning-delta"),
+    id: z.string(),
+    delta: z.string(),
     providerMetadata: providerMetadataSchema2.optional()
   }),
-  z$1.strictObject({
-    type: z$1.literal("reasoning-end"),
-    id: z$1.string(),
+  z.strictObject({
+    type: z.literal("reasoning-end"),
+    id: z.string(),
     providerMetadata: providerMetadataSchema2.optional()
   }),
-  z$1.strictObject({
-    type: z$1.literal("source-url"),
-    sourceId: z$1.string(),
-    url: z$1.string(),
-    title: z$1.string().optional(),
+  z.strictObject({
+    type: z.literal("source-url"),
+    sourceId: z.string(),
+    url: z.string(),
+    title: z.string().optional(),
     providerMetadata: providerMetadataSchema2.optional()
   }),
-  z$1.strictObject({
-    type: z$1.literal("source-document"),
-    sourceId: z$1.string(),
-    mediaType: z$1.string(),
-    title: z$1.string(),
-    filename: z$1.string().optional(),
+  z.strictObject({
+    type: z.literal("source-document"),
+    sourceId: z.string(),
+    mediaType: z.string(),
+    title: z.string(),
+    filename: z.string().optional(),
     providerMetadata: providerMetadataSchema2.optional()
   }),
-  z$1.strictObject({
-    type: z$1.literal("file"),
-    url: z$1.string(),
-    mediaType: z$1.string(),
+  z.strictObject({
+    type: z.literal("file"),
+    url: z.string(),
+    mediaType: z.string(),
     providerMetadata: providerMetadataSchema2.optional()
   }),
-  z$1.strictObject({
-    type: z$1.custom(
+  z.strictObject({
+    type: z.custom(
       (value) => typeof value === "string" && value.startsWith("data-"),
       { message: 'Type must start with "data-"' }
     ),
-    id: z$1.string().optional(),
-    data: z$1.unknown(),
-    transient: z$1.boolean().optional()
+    id: z.string().optional(),
+    data: z.unknown(),
+    transient: z.boolean().optional()
   }),
-  z$1.strictObject({
-    type: z$1.literal("start-step")
+  z.strictObject({
+    type: z.literal("start-step")
   }),
-  z$1.strictObject({
-    type: z$1.literal("finish-step")
+  z.strictObject({
+    type: z.literal("finish-step")
   }),
-  z$1.strictObject({
-    type: z$1.literal("start"),
-    messageId: z$1.string().optional(),
-    messageMetadata: z$1.unknown().optional()
+  z.strictObject({
+    type: z.literal("start"),
+    messageId: z.string().optional(),
+    messageMetadata: z.unknown().optional()
   }),
-  z$1.strictObject({
-    type: z$1.literal("finish"),
-    messageMetadata: z$1.unknown().optional()
+  z.strictObject({
+    type: z.literal("finish"),
+    messageMetadata: z.unknown().optional()
   }),
-  z$1.strictObject({
-    type: z$1.literal("abort")
+  z.strictObject({
+    type: z.literal("abort")
   }),
-  z$1.strictObject({
-    type: z$1.literal("message-metadata"),
-    messageMetadata: z$1.unknown()
+  z.strictObject({
+    type: z.literal("message-metadata"),
+    messageMetadata: z.unknown()
   })
 ]);
 function fixJson2(input) {
@@ -16809,262 +17510,262 @@ var object2 = ({
     }
   };
 };
-var ClientOrServerImplementationSchema2 = z$1.looseObject({
-  name: z$1.string(),
-  version: z$1.string()
+var ClientOrServerImplementationSchema2 = z.looseObject({
+  name: z.string(),
+  version: z.string()
 });
-var BaseParamsSchema2 = z$1.looseObject({
-  _meta: z$1.optional(z$1.object({}).loose())
+var BaseParamsSchema2 = z.looseObject({
+  _meta: z.optional(z.object({}).loose())
 });
 var ResultSchema2 = BaseParamsSchema2;
-var RequestSchema2 = z$1.object({
-  method: z$1.string(),
-  params: z$1.optional(BaseParamsSchema2)
+var RequestSchema2 = z.object({
+  method: z.string(),
+  params: z.optional(BaseParamsSchema2)
 });
-var ServerCapabilitiesSchema2 = z$1.looseObject({
-  experimental: z$1.optional(z$1.object({}).loose()),
-  logging: z$1.optional(z$1.object({}).loose()),
-  prompts: z$1.optional(
-    z$1.looseObject({
-      listChanged: z$1.optional(z$1.boolean())
+var ServerCapabilitiesSchema2 = z.looseObject({
+  experimental: z.optional(z.object({}).loose()),
+  logging: z.optional(z.object({}).loose()),
+  prompts: z.optional(
+    z.looseObject({
+      listChanged: z.optional(z.boolean())
     })
   ),
-  resources: z$1.optional(
-    z$1.looseObject({
-      subscribe: z$1.optional(z$1.boolean()),
-      listChanged: z$1.optional(z$1.boolean())
+  resources: z.optional(
+    z.looseObject({
+      subscribe: z.optional(z.boolean()),
+      listChanged: z.optional(z.boolean())
     })
   ),
-  tools: z$1.optional(
-    z$1.looseObject({
-      listChanged: z$1.optional(z$1.boolean())
+  tools: z.optional(
+    z.looseObject({
+      listChanged: z.optional(z.boolean())
     })
   )
 });
 ResultSchema2.extend({
-  protocolVersion: z$1.string(),
+  protocolVersion: z.string(),
   capabilities: ServerCapabilitiesSchema2,
   serverInfo: ClientOrServerImplementationSchema2,
-  instructions: z$1.optional(z$1.string())
+  instructions: z.optional(z.string())
 });
 var PaginatedResultSchema2 = ResultSchema2.extend({
-  nextCursor: z$1.optional(z$1.string())
+  nextCursor: z.optional(z.string())
 });
-var ToolSchema2 = z$1.object({
-  name: z$1.string(),
-  description: z$1.optional(z$1.string()),
-  inputSchema: z$1.object({
-    type: z$1.literal("object"),
-    properties: z$1.optional(z$1.object({}).loose())
+var ToolSchema2 = z.object({
+  name: z.string(),
+  description: z.optional(z.string()),
+  inputSchema: z.object({
+    type: z.literal("object"),
+    properties: z.optional(z.object({}).loose())
   }).loose()
 }).loose();
 PaginatedResultSchema2.extend({
-  tools: z$1.array(ToolSchema2)
+  tools: z.array(ToolSchema2)
 });
-var TextContentSchema2 = z$1.object({
-  type: z$1.literal("text"),
-  text: z$1.string()
+var TextContentSchema2 = z.object({
+  type: z.literal("text"),
+  text: z.string()
 }).loose();
-var ImageContentSchema2 = z$1.object({
-  type: z$1.literal("image"),
-  data: z$1.base64(),
-  mimeType: z$1.string()
+var ImageContentSchema2 = z.object({
+  type: z.literal("image"),
+  data: z.base64(),
+  mimeType: z.string()
 }).loose();
-var ResourceContentsSchema2 = z$1.object({
+var ResourceContentsSchema2 = z.object({
   /**
    * The URI of this resource.
    */
-  uri: z$1.string(),
+  uri: z.string(),
   /**
    * The MIME type of this resource, if known.
    */
-  mimeType: z$1.optional(z$1.string())
+  mimeType: z.optional(z.string())
 }).loose();
 var TextResourceContentsSchema2 = ResourceContentsSchema2.extend({
-  text: z$1.string()
+  text: z.string()
 });
 var BlobResourceContentsSchema2 = ResourceContentsSchema2.extend({
-  blob: z$1.base64()
+  blob: z.base64()
 });
-var EmbeddedResourceSchema2 = z$1.object({
-  type: z$1.literal("resource"),
-  resource: z$1.union([TextResourceContentsSchema2, BlobResourceContentsSchema2])
+var EmbeddedResourceSchema2 = z.object({
+  type: z.literal("resource"),
+  resource: z.union([TextResourceContentsSchema2, BlobResourceContentsSchema2])
 }).loose();
 ResultSchema2.extend({
-  content: z$1.array(
-    z$1.union([TextContentSchema2, ImageContentSchema2, EmbeddedResourceSchema2])
+  content: z.array(
+    z.union([TextContentSchema2, ImageContentSchema2, EmbeddedResourceSchema2])
   ),
-  isError: z$1.boolean().default(false).optional()
+  isError: z.boolean().default(false).optional()
 }).or(
   ResultSchema2.extend({
-    toolResult: z$1.unknown()
+    toolResult: z.unknown()
   })
 );
 var JSONRPC_VERSION2 = "2.0";
-var JSONRPCRequestSchema2 = z$1.object({
-  jsonrpc: z$1.literal(JSONRPC_VERSION2),
-  id: z$1.union([z$1.string(), z$1.number().int()])
+var JSONRPCRequestSchema2 = z.object({
+  jsonrpc: z.literal(JSONRPC_VERSION2),
+  id: z.union([z.string(), z.number().int()])
 }).merge(RequestSchema2).strict();
-var JSONRPCResponseSchema2 = z$1.object({
-  jsonrpc: z$1.literal(JSONRPC_VERSION2),
-  id: z$1.union([z$1.string(), z$1.number().int()]),
+var JSONRPCResponseSchema2 = z.object({
+  jsonrpc: z.literal(JSONRPC_VERSION2),
+  id: z.union([z.string(), z.number().int()]),
   result: ResultSchema2
 }).strict();
-var JSONRPCErrorSchema2 = z$1.object({
-  jsonrpc: z$1.literal(JSONRPC_VERSION2),
-  id: z$1.union([z$1.string(), z$1.number().int()]),
-  error: z$1.object({
-    code: z$1.number().int(),
-    message: z$1.string(),
-    data: z$1.optional(z$1.unknown())
+var JSONRPCErrorSchema2 = z.object({
+  jsonrpc: z.literal(JSONRPC_VERSION2),
+  id: z.union([z.string(), z.number().int()]),
+  error: z.object({
+    code: z.number().int(),
+    message: z.string(),
+    data: z.optional(z.unknown())
   })
 }).strict();
-var JSONRPCNotificationSchema2 = z$1.object({
-  jsonrpc: z$1.literal(JSONRPC_VERSION2)
+var JSONRPCNotificationSchema2 = z.object({
+  jsonrpc: z.literal(JSONRPC_VERSION2)
 }).merge(
-  z$1.object({
-    method: z$1.string(),
-    params: z$1.optional(BaseParamsSchema2)
+  z.object({
+    method: z.string(),
+    params: z.optional(BaseParamsSchema2)
   })
 ).strict();
-z$1.union([
+z.union([
   JSONRPCRequestSchema2,
   JSONRPCNotificationSchema2,
   JSONRPCResponseSchema2,
   JSONRPCErrorSchema2
 ]);
-var textUIPartSchema = z$1.object({
-  type: z$1.literal("text"),
-  text: z$1.string(),
-  state: z$1.enum(["streaming", "done"]).optional(),
+var textUIPartSchema = z.object({
+  type: z.literal("text"),
+  text: z.string(),
+  state: z.enum(["streaming", "done"]).optional(),
   providerMetadata: providerMetadataSchema2.optional()
 });
-var reasoningUIPartSchema = z$1.object({
-  type: z$1.literal("reasoning"),
-  text: z$1.string(),
-  state: z$1.enum(["streaming", "done"]).optional(),
+var reasoningUIPartSchema = z.object({
+  type: z.literal("reasoning"),
+  text: z.string(),
+  state: z.enum(["streaming", "done"]).optional(),
   providerMetadata: providerMetadataSchema2.optional()
 });
-var sourceUrlUIPartSchema = z$1.object({
-  type: z$1.literal("source-url"),
-  sourceId: z$1.string(),
-  url: z$1.string(),
-  title: z$1.string().optional(),
+var sourceUrlUIPartSchema = z.object({
+  type: z.literal("source-url"),
+  sourceId: z.string(),
+  url: z.string(),
+  title: z.string().optional(),
   providerMetadata: providerMetadataSchema2.optional()
 });
-var sourceDocumentUIPartSchema = z$1.object({
-  type: z$1.literal("source-document"),
-  sourceId: z$1.string(),
-  mediaType: z$1.string(),
-  title: z$1.string(),
-  filename: z$1.string().optional(),
+var sourceDocumentUIPartSchema = z.object({
+  type: z.literal("source-document"),
+  sourceId: z.string(),
+  mediaType: z.string(),
+  title: z.string(),
+  filename: z.string().optional(),
   providerMetadata: providerMetadataSchema2.optional()
 });
-var fileUIPartSchema = z$1.object({
-  type: z$1.literal("file"),
-  mediaType: z$1.string(),
-  filename: z$1.string().optional(),
-  url: z$1.string(),
+var fileUIPartSchema = z.object({
+  type: z.literal("file"),
+  mediaType: z.string(),
+  filename: z.string().optional(),
+  url: z.string(),
   providerMetadata: providerMetadataSchema2.optional()
 });
-var stepStartUIPartSchema = z$1.object({
-  type: z$1.literal("step-start")
+var stepStartUIPartSchema = z.object({
+  type: z.literal("step-start")
 });
-var dataUIPartSchema = z$1.object({
-  type: z$1.string().startsWith("data-"),
-  id: z$1.string().optional(),
-  data: z$1.unknown()
+var dataUIPartSchema = z.object({
+  type: z.string().startsWith("data-"),
+  id: z.string().optional(),
+  data: z.unknown()
 });
 var dynamicToolUIPartSchemas = [
-  z$1.object({
-    type: z$1.literal("dynamic-tool"),
-    toolName: z$1.string(),
-    toolCallId: z$1.string(),
-    state: z$1.literal("input-streaming"),
-    input: z$1.unknown().optional(),
-    output: z$1.never().optional(),
-    errorText: z$1.never().optional()
+  z.object({
+    type: z.literal("dynamic-tool"),
+    toolName: z.string(),
+    toolCallId: z.string(),
+    state: z.literal("input-streaming"),
+    input: z.unknown().optional(),
+    output: z.never().optional(),
+    errorText: z.never().optional()
   }),
-  z$1.object({
-    type: z$1.literal("dynamic-tool"),
-    toolName: z$1.string(),
-    toolCallId: z$1.string(),
-    state: z$1.literal("input-available"),
-    input: z$1.unknown(),
-    output: z$1.never().optional(),
-    errorText: z$1.never().optional(),
+  z.object({
+    type: z.literal("dynamic-tool"),
+    toolName: z.string(),
+    toolCallId: z.string(),
+    state: z.literal("input-available"),
+    input: z.unknown(),
+    output: z.never().optional(),
+    errorText: z.never().optional(),
     callProviderMetadata: providerMetadataSchema2.optional()
   }),
-  z$1.object({
-    type: z$1.literal("dynamic-tool"),
-    toolName: z$1.string(),
-    toolCallId: z$1.string(),
-    state: z$1.literal("output-available"),
-    input: z$1.unknown(),
-    output: z$1.unknown(),
-    errorText: z$1.never().optional(),
+  z.object({
+    type: z.literal("dynamic-tool"),
+    toolName: z.string(),
+    toolCallId: z.string(),
+    state: z.literal("output-available"),
+    input: z.unknown(),
+    output: z.unknown(),
+    errorText: z.never().optional(),
     callProviderMetadata: providerMetadataSchema2.optional(),
-    preliminary: z$1.boolean().optional()
+    preliminary: z.boolean().optional()
   }),
-  z$1.object({
-    type: z$1.literal("dynamic-tool"),
-    toolName: z$1.string(),
-    toolCallId: z$1.string(),
-    state: z$1.literal("output-error"),
-    input: z$1.unknown(),
-    output: z$1.never().optional(),
-    errorText: z$1.string(),
+  z.object({
+    type: z.literal("dynamic-tool"),
+    toolName: z.string(),
+    toolCallId: z.string(),
+    state: z.literal("output-error"),
+    input: z.unknown(),
+    output: z.never().optional(),
+    errorText: z.string(),
     callProviderMetadata: providerMetadataSchema2.optional()
   })
 ];
 var toolUIPartSchemas = [
-  z$1.object({
-    type: z$1.string().startsWith("tool-"),
-    toolCallId: z$1.string(),
-    state: z$1.literal("input-streaming"),
-    providerExecuted: z$1.boolean().optional(),
-    input: z$1.unknown().optional(),
-    output: z$1.never().optional(),
-    errorText: z$1.never().optional()
+  z.object({
+    type: z.string().startsWith("tool-"),
+    toolCallId: z.string(),
+    state: z.literal("input-streaming"),
+    providerExecuted: z.boolean().optional(),
+    input: z.unknown().optional(),
+    output: z.never().optional(),
+    errorText: z.never().optional()
   }),
-  z$1.object({
-    type: z$1.string().startsWith("tool-"),
-    toolCallId: z$1.string(),
-    state: z$1.literal("input-available"),
-    providerExecuted: z$1.boolean().optional(),
-    input: z$1.unknown(),
-    output: z$1.never().optional(),
-    errorText: z$1.never().optional(),
+  z.object({
+    type: z.string().startsWith("tool-"),
+    toolCallId: z.string(),
+    state: z.literal("input-available"),
+    providerExecuted: z.boolean().optional(),
+    input: z.unknown(),
+    output: z.never().optional(),
+    errorText: z.never().optional(),
     callProviderMetadata: providerMetadataSchema2.optional()
   }),
-  z$1.object({
-    type: z$1.string().startsWith("tool-"),
-    toolCallId: z$1.string(),
-    state: z$1.literal("output-available"),
-    providerExecuted: z$1.boolean().optional(),
-    input: z$1.unknown(),
-    output: z$1.unknown(),
-    errorText: z$1.never().optional(),
+  z.object({
+    type: z.string().startsWith("tool-"),
+    toolCallId: z.string(),
+    state: z.literal("output-available"),
+    providerExecuted: z.boolean().optional(),
+    input: z.unknown(),
+    output: z.unknown(),
+    errorText: z.never().optional(),
     callProviderMetadata: providerMetadataSchema2.optional(),
-    preliminary: z$1.boolean().optional()
+    preliminary: z.boolean().optional()
   }),
-  z$1.object({
-    type: z$1.string().startsWith("tool-"),
-    toolCallId: z$1.string(),
-    state: z$1.literal("output-error"),
-    providerExecuted: z$1.boolean().optional(),
-    input: z$1.unknown(),
-    output: z$1.never().optional(),
-    errorText: z$1.string(),
+  z.object({
+    type: z.string().startsWith("tool-"),
+    toolCallId: z.string(),
+    state: z.literal("output-error"),
+    providerExecuted: z.boolean().optional(),
+    input: z.unknown(),
+    output: z.never().optional(),
+    errorText: z.string(),
     callProviderMetadata: providerMetadataSchema2.optional()
   })
 ];
-z$1.object({
-  id: z$1.string(),
-  role: z$1.enum(["system", "user", "assistant"]),
-  metadata: z$1.unknown().optional(),
-  parts: z$1.array(
-    z$1.union([
+z.object({
+  id: z.string(),
+  role: z.enum(["system", "user", "assistant"]),
+  metadata: z.unknown().optional(),
+  parts: z.array(
+    z.union([
       textUIPartSchema,
       reasoningUIPartSchema,
       sourceUrlUIPartSchema,
@@ -17341,8 +18042,8 @@ var TypeHandler = class {
       types.object = false;
     }
     if (typeSet.has("integer") && types.number !== false) {
-      const currentNumber = types.number || z$1.number();
-      if (currentNumber instanceof z$1.ZodNumber) {
+      const currentNumber = types.number || z.number();
+      if (currentNumber instanceof z.ZodNumber) {
         types.number = currentNumber.int();
       }
     }
@@ -17359,13 +18060,13 @@ var ConstHandler = class {
     types.array = false;
     types.object = false;
     if (typeof constValue === "string") {
-      types.string = z$1.literal(constValue);
+      types.string = z.literal(constValue);
     } else if (typeof constValue === "number") {
-      types.number = z$1.literal(constValue);
+      types.number = z.literal(constValue);
     } else if (typeof constValue === "boolean") {
-      types.boolean = z$1.literal(constValue);
+      types.boolean = z.literal(constValue);
     } else if (constValue === null) {
-      types.null = z$1.null();
+      types.null = z.null();
     } else if (Array.isArray(constValue)) {
       types.array = void 0;
     } else if (typeof constValue === "object") {
@@ -17398,24 +18099,24 @@ var EnumHandler = class {
     types.string = this.createTypeSchema(valuesByType.string, "string");
     types.number = this.createTypeSchema(valuesByType.number, "number");
     types.boolean = this.createTypeSchema(valuesByType.boolean, "boolean");
-    types.null = valuesByType.null.length > 0 ? z$1.null() : false;
+    types.null = valuesByType.null.length > 0 ? z.null() : false;
     types.array = valuesByType.array.length > 0 ? void 0 : false;
     types.object = valuesByType.object.length > 0 ? void 0 : false;
   }
   createTypeSchema(values, type) {
     if (values.length === 0) return false;
     if (values.length === 1) {
-      return z$1.literal(values[0]);
+      return z.literal(values[0]);
     }
     if (type === "string") {
-      return z$1.enum(values);
+      return z.enum(values);
     }
     if (type === "number") {
       const [first, second, ...rest] = values;
-      return z$1.union([z$1.literal(first), z$1.literal(second), ...rest.map((v) => z$1.literal(v))]);
+      return z.union([z.literal(first), z.literal(second), ...rest.map((v) => z.literal(v))]);
     }
     if (type === "boolean") {
-      return z$1.union([z$1.literal(true), z$1.literal(false)]);
+      return z.union([z.literal(true), z.literal(false)]);
     }
     return false;
   }
@@ -17425,7 +18126,7 @@ var ImplicitStringHandler = class {
     const stringSchema = schema;
     if (schema.type === void 0 && (stringSchema.minLength !== void 0 || stringSchema.maxLength !== void 0 || stringSchema.pattern !== void 0)) {
       if (types.string === void 0) {
-        types.string = z$1.string();
+        types.string = z.string();
       }
     }
   }
@@ -17435,8 +18136,8 @@ var MinLengthHandler = class {
     const stringSchema = schema;
     if (stringSchema.minLength === void 0) return;
     if (types.string !== false) {
-      const currentString = types.string || z$1.string();
-      if (currentString instanceof z$1.ZodString) {
+      const currentString = types.string || z.string();
+      if (currentString instanceof z.ZodString) {
         types.string = currentString.refine(
           (value) => {
             const graphemeLength = Array.from(value).length;
@@ -17453,8 +18154,8 @@ var MaxLengthHandler = class {
     const stringSchema = schema;
     if (stringSchema.maxLength === void 0) return;
     if (types.string !== false) {
-      const currentString = types.string || z$1.string();
-      if (currentString instanceof z$1.ZodString) {
+      const currentString = types.string || z.string();
+      if (currentString instanceof z.ZodString) {
         types.string = currentString.refine(
           (value) => {
             const graphemeLength = Array.from(value).length;
@@ -17471,8 +18172,8 @@ var PatternHandler = class {
     const stringSchema = schema;
     if (!stringSchema.pattern) return;
     if (types.string !== false) {
-      const currentString = types.string || z$1.string();
-      if (currentString instanceof z$1.ZodString) {
+      const currentString = types.string || z.string();
+      if (currentString instanceof z.ZodString) {
         const regex = new RegExp(stringSchema.pattern);
         types.string = currentString.regex(regex);
       }
@@ -17484,8 +18185,8 @@ var MinimumHandler = class {
     const numberSchema = schema;
     if (numberSchema.minimum === void 0) return;
     if (types.number !== false) {
-      const currentNumber = types.number || z$1.number();
-      if (currentNumber instanceof z$1.ZodNumber) {
+      const currentNumber = types.number || z.number();
+      if (currentNumber instanceof z.ZodNumber) {
         types.number = currentNumber.min(numberSchema.minimum);
       }
     }
@@ -17496,8 +18197,8 @@ var MaximumHandler = class {
     const numberSchema = schema;
     if (numberSchema.maximum === void 0) return;
     if (types.number !== false) {
-      const currentNumber = types.number || z$1.number();
-      if (currentNumber instanceof z$1.ZodNumber) {
+      const currentNumber = types.number || z.number();
+      if (currentNumber instanceof z.ZodNumber) {
         types.number = currentNumber.max(numberSchema.maximum);
       }
     }
@@ -17508,8 +18209,8 @@ var ExclusiveMinimumHandler = class {
     const numberSchema = schema;
     if (numberSchema.exclusiveMinimum === void 0) return;
     if (types.number !== false) {
-      const currentNumber = types.number || z$1.number();
-      if (currentNumber instanceof z$1.ZodNumber) {
+      const currentNumber = types.number || z.number();
+      if (currentNumber instanceof z.ZodNumber) {
         if (typeof numberSchema.exclusiveMinimum === "number") {
           types.number = currentNumber.gt(numberSchema.exclusiveMinimum);
         } else {
@@ -17524,8 +18225,8 @@ var ExclusiveMaximumHandler = class {
     const numberSchema = schema;
     if (numberSchema.exclusiveMaximum === void 0) return;
     if (types.number !== false) {
-      const currentNumber = types.number || z$1.number();
-      if (currentNumber instanceof z$1.ZodNumber) {
+      const currentNumber = types.number || z.number();
+      if (currentNumber instanceof z.ZodNumber) {
         if (typeof numberSchema.exclusiveMaximum === "number") {
           types.number = currentNumber.lt(numberSchema.exclusiveMaximum);
         } else {
@@ -17540,8 +18241,8 @@ var MultipleOfHandler = class {
     const numberSchema = schema;
     if (numberSchema.multipleOf === void 0) return;
     if (types.number !== false) {
-      const currentNumber = types.number || z$1.number();
-      if (currentNumber instanceof z$1.ZodNumber) {
+      const currentNumber = types.number || z.number();
+      if (currentNumber instanceof z.ZodNumber) {
         types.number = currentNumber.refine(
           (value) => {
             if (numberSchema.multipleOf === 0) return false;
@@ -17564,7 +18265,7 @@ var ImplicitArrayHandler = class {
     const arraySchema = schema;
     if (schema.type === void 0 && (arraySchema.minItems !== void 0 || arraySchema.maxItems !== void 0 || arraySchema.items !== void 0 || arraySchema.prefixItems !== void 0)) {
       if (types.array === void 0) {
-        types.array = z$1.array(z$1.any());
+        types.array = z.array(z.any());
       }
     }
   }
@@ -17574,7 +18275,7 @@ var MinItemsHandler = class {
     const arraySchema = schema;
     if (arraySchema.minItems === void 0) return;
     if (types.array !== false) {
-      types.array = (types.array || z$1.array(z$1.any())).min(arraySchema.minItems);
+      types.array = (types.array || z.array(z.any())).min(arraySchema.minItems);
     }
   }
 };
@@ -17583,7 +18284,7 @@ var MaxItemsHandler = class {
     const arraySchema = schema;
     if (arraySchema.maxItems === void 0) return;
     if (types.array !== false) {
-      types.array = (types.array || z$1.array(z$1.any())).max(arraySchema.maxItems);
+      types.array = (types.array || z.array(z.any())).max(arraySchema.maxItems);
     }
   }
 };
@@ -17592,11 +18293,11 @@ var ItemsHandler = class {
     const arraySchema = schema;
     if (types.array === false) return;
     if (Array.isArray(arraySchema.items)) {
-      types.array = types.array || z$1.array(z$1.any());
+      types.array = types.array || z.array(z.any());
     } else if (arraySchema.items && typeof arraySchema.items !== "boolean" && !arraySchema.prefixItems) {
       const itemSchema = convertJsonSchemaToZod(arraySchema.items);
-      let newArray = z$1.array(itemSchema);
-      if (types.array && types.array instanceof z$1.ZodArray) {
+      let newArray = z.array(itemSchema);
+      if (types.array && types.array instanceof z.ZodArray) {
         const existingDef = types.array._def;
         if (existingDef.checks) {
           existingDef.checks.forEach((check) => {
@@ -17614,14 +18315,14 @@ var ItemsHandler = class {
       types.array = newArray;
     } else if (typeof arraySchema.items === "boolean" && arraySchema.items === false) {
       if (!arraySchema.prefixItems) {
-        types.array = z$1.array(z$1.any()).max(0);
+        types.array = z.array(z.any()).max(0);
       } else {
-        types.array = types.array || z$1.array(z$1.any());
+        types.array = types.array || z.array(z.any());
       }
     } else if (typeof arraySchema.items === "boolean" && arraySchema.items === true) {
-      types.array = types.array || z$1.array(z$1.any());
+      types.array = types.array || z.array(z.any());
     } else if (arraySchema.prefixItems) {
-      types.array = types.array || z$1.array(z$1.any());
+      types.array = types.array || z.array(z.any());
     }
   }
 };
@@ -17634,9 +18335,9 @@ var TupleHandler = class {
     const itemSchemas = arraySchema.items.map((itemSchema) => convertJsonSchemaToZod(itemSchema));
     let tuple;
     if (itemSchemas.length === 0) {
-      tuple = z$1.tuple([]);
+      tuple = z.tuple([]);
     } else {
-      tuple = z$1.tuple(itemSchemas);
+      tuple = z.tuple(itemSchemas);
     }
     if (arraySchema.minItems !== void 0 && arraySchema.minItems > itemSchemas.length) {
       tuple = false;
@@ -17653,7 +18354,7 @@ var PropertiesHandler = class {
     const objectSchema = schema;
     if (types.object === false) return;
     if (objectSchema.properties || objectSchema.required || objectSchema.additionalProperties !== void 0) {
-      types.object = types.object || z$1.object({}).passthrough();
+      types.object = types.object || z.object({}).passthrough();
     }
   }
 };
@@ -17662,7 +18363,7 @@ var ImplicitObjectHandler = class {
     const objectSchema = schema;
     if (schema.type === void 0 && (objectSchema.maxProperties !== void 0 || objectSchema.minProperties !== void 0)) {
       if (types.object === void 0) {
-        types.object = z$1.object({}).passthrough();
+        types.object = z.object({}).passthrough();
       }
     }
   }
@@ -17672,7 +18373,7 @@ var MaxPropertiesHandler = class {
     const objectSchema = schema;
     if (objectSchema.maxProperties === void 0) return;
     if (types.object !== false) {
-      const baseObject = types.object || z$1.object({}).passthrough();
+      const baseObject = types.object || z.object({}).passthrough();
       types.object = baseObject.refine(
         (obj) => Object.keys(obj).length <= objectSchema.maxProperties,
         { message: `Object must have at most ${objectSchema.maxProperties} properties` }
@@ -17685,7 +18386,7 @@ var MinPropertiesHandler = class {
     const objectSchema = schema;
     if (objectSchema.minProperties === void 0) return;
     if (types.object !== false) {
-      const baseObject = types.object || z$1.object({}).passthrough();
+      const baseObject = types.object || z.object({}).passthrough();
       types.object = baseObject.refine(
         (obj) => Object.keys(obj).length >= objectSchema.minProperties,
         { message: `Object must have at least ${objectSchema.minProperties} properties` }
@@ -17752,7 +18453,7 @@ var AllOfHandler = class {
     if (!schema.allOf || schema.allOf.length === 0) return zodSchema4;
     const allOfSchemas = schema.allOf.map((s) => convertJsonSchemaToZod(s));
     return allOfSchemas.reduce(
-      (acc, s) => z$1.intersection(acc, s),
+      (acc, s) => z.intersection(acc, s),
       zodSchema4
     );
   }
@@ -17760,12 +18461,12 @@ var AllOfHandler = class {
 var AnyOfHandler = class {
   apply(zodSchema4, schema) {
     if (!schema.anyOf || schema.anyOf.length === 0) return zodSchema4;
-    const anyOfSchema = schema.anyOf.length === 1 ? convertJsonSchemaToZod(schema.anyOf[0]) : z$1.union([
+    const anyOfSchema = schema.anyOf.length === 1 ? convertJsonSchemaToZod(schema.anyOf[0]) : z.union([
       convertJsonSchemaToZod(schema.anyOf[0]),
       convertJsonSchemaToZod(schema.anyOf[1]),
       ...schema.anyOf.slice(2).map((s) => convertJsonSchemaToZod(s))
     ]);
-    return z$1.intersection(zodSchema4, anyOfSchema);
+    return z.intersection(zodSchema4, anyOfSchema);
   }
 };
 var OneOfHandler = class {
@@ -17828,7 +18529,7 @@ var ObjectPropertiesHandler = class {
     if (!objectSchema.properties && !objectSchema.required && objectSchema.additionalProperties !== false) {
       return zodSchema4;
     }
-    if (zodSchema4 instanceof z$1.ZodObject || zodSchema4 instanceof z$1.ZodRecord) {
+    if (zodSchema4 instanceof z.ZodObject || zodSchema4 instanceof z.ZodRecord) {
       const shape = {};
       if (objectSchema.properties) {
         for (const [key, propSchema] of Object.entries(objectSchema.properties)) {
@@ -17850,9 +18551,9 @@ var ObjectPropertiesHandler = class {
         }
       }
       if (objectSchema.additionalProperties === false) {
-        return z$1.object(shape);
+        return z.object(shape);
       } else {
-        return z$1.object(shape).passthrough();
+        return z.object(shape).passthrough();
       }
     }
     return zodSchema4.refine(
@@ -17942,7 +18643,7 @@ var ProtoRequiredHandler = class {
     if (!((_a21 = objectSchema.required) == null ? void 0 : _a21.includes("__proto__")) || schema.type !== void 0) {
       return zodSchema4;
     }
-    return z$1.any().refine(
+    return z.any().refine(
       (value) => this.validateRequired(value, objectSchema.required),
       { message: "Missing required properties" }
     );
@@ -18038,7 +18739,7 @@ var refinementHandlers = [
 ];
 function convertJsonSchemaToZod(schema) {
   if (typeof schema === "boolean") {
-    return schema ? z$1.any() : z$1.never();
+    return schema ? z.any() : z.never();
   }
   const types = {};
   for (const handler of primitiveHandlers) {
@@ -18046,19 +18747,19 @@ function convertJsonSchemaToZod(schema) {
   }
   const allowedSchemas = [];
   if (types.string !== false) {
-    allowedSchemas.push(types.string || z$1.string());
+    allowedSchemas.push(types.string || z.string());
   }
   if (types.number !== false) {
-    allowedSchemas.push(types.number || z$1.number());
+    allowedSchemas.push(types.number || z.number());
   }
   if (types.boolean !== false) {
-    allowedSchemas.push(types.boolean || z$1.boolean());
+    allowedSchemas.push(types.boolean || z.boolean());
   }
   if (types.null !== false) {
-    allowedSchemas.push(types.null || z$1.null());
+    allowedSchemas.push(types.null || z.null());
   }
   if (types.array !== false) {
-    allowedSchemas.push(types.array || z$1.array(z$1.any()));
+    allowedSchemas.push(types.array || z.array(z.any()));
   }
   if (types.tuple !== false && types.tuple !== void 0) {
     allowedSchemas.push(types.tuple);
@@ -18067,7 +18768,7 @@ function convertJsonSchemaToZod(schema) {
     if (types.object) {
       allowedSchemas.push(types.object);
     } else {
-      const objectSchema = z$1.custom((val) => {
+      const objectSchema = z.custom((val) => {
         return typeof val === "object" && val !== null && !Array.isArray(val);
       }, "Must be an object, not an array");
       allowedSchemas.push(objectSchema);
@@ -18075,7 +18776,7 @@ function convertJsonSchemaToZod(schema) {
   }
   let zodSchema4;
   if (allowedSchemas.length === 0) {
-    zodSchema4 = z$1.never();
+    zodSchema4 = z.never();
   } else if (allowedSchemas.length === 1) {
     zodSchema4 = allowedSchemas[0];
   } else {
@@ -18083,9 +18784,9 @@ function convertJsonSchemaToZod(schema) {
       (key) => key !== "$schema" && key !== "title" && key !== "description"
     );
     if (!hasConstraints) {
-      zodSchema4 = z$1.any();
+      zodSchema4 = z.any();
     } else {
-      zodSchema4 = z$1.union(allowedSchemas);
+      zodSchema4 = z.union(allowedSchemas);
     }
   }
   for (const handler of refinementHandlers) {
@@ -20685,14 +21386,14 @@ function zod4Schema2(zodSchema22, options) {
   const useReferences = (_a21 = void 0 ) != null ? _a21 : false;
   return jsonSchema3(
     // defer json schema creation to avoid unnecessary computation when only validation is needed
-    () => z42.toJSONSchema(zodSchema22, {
+    () => toJSONSchema(zodSchema22, {
       target: "draft-7",
       io: "output",
       reused: useReferences ? "ref" : "inline"
     }),
     {
       validate: async (value) => {
-        const result = await z42.safeParseAsync(zodSchema22, value);
+        const result = await safeParseAsync(zodSchema22, value);
         return result.success ? { success: true, value: result.data } : { success: false, error: result.error };
       }
     }
@@ -20765,11 +21466,11 @@ var NoObjectGeneratedError3 = class extends AISDKError2 {
   }
 };
 _a75 = symbol75;
-var dataContentSchema3 = z$1.union([
-  z$1.string(),
-  z$1.instanceof(Uint8Array),
-  z$1.instanceof(ArrayBuffer),
-  z$1.custom(
+var dataContentSchema3 = z.union([
+  z.string(),
+  z.instanceof(Uint8Array),
+  z.instanceof(ArrayBuffer),
+  z.custom(
     // Buffer might not be available in some environments such as CloudFlare:
     (value) => {
       var _a172, _b8;
@@ -20778,113 +21479,113 @@ var dataContentSchema3 = z$1.union([
     { message: "Must be a Buffer" }
   )
 ]);
-var jsonValueSchema3 = z$1.lazy(
-  () => z$1.union([
-    z$1.null(),
-    z$1.string(),
-    z$1.number(),
-    z$1.boolean(),
-    z$1.record(z$1.string(), jsonValueSchema3),
-    z$1.array(jsonValueSchema3)
+var jsonValueSchema3 = z.lazy(
+  () => z.union([
+    z.null(),
+    z.string(),
+    z.number(),
+    z.boolean(),
+    z.record(z.string(), jsonValueSchema3),
+    z.array(jsonValueSchema3)
   ])
 );
-var providerMetadataSchema3 = z$1.record(
-  z$1.string(),
-  z$1.record(z$1.string(), jsonValueSchema3)
+var providerMetadataSchema3 = z.record(
+  z.string(),
+  z.record(z.string(), jsonValueSchema3)
 );
-var textPartSchema3 = z$1.object({
-  type: z$1.literal("text"),
-  text: z$1.string(),
+var textPartSchema3 = z.object({
+  type: z.literal("text"),
+  text: z.string(),
   providerOptions: providerMetadataSchema3.optional()
 });
-var imagePartSchema3 = z$1.object({
-  type: z$1.literal("image"),
-  image: z$1.union([dataContentSchema3, z$1.instanceof(URL)]),
-  mediaType: z$1.string().optional(),
+var imagePartSchema3 = z.object({
+  type: z.literal("image"),
+  image: z.union([dataContentSchema3, z.instanceof(URL)]),
+  mediaType: z.string().optional(),
   providerOptions: providerMetadataSchema3.optional()
 });
-var filePartSchema3 = z$1.object({
-  type: z$1.literal("file"),
-  data: z$1.union([dataContentSchema3, z$1.instanceof(URL)]),
-  filename: z$1.string().optional(),
-  mediaType: z$1.string(),
+var filePartSchema3 = z.object({
+  type: z.literal("file"),
+  data: z.union([dataContentSchema3, z.instanceof(URL)]),
+  filename: z.string().optional(),
+  mediaType: z.string(),
   providerOptions: providerMetadataSchema3.optional()
 });
-var reasoningPartSchema3 = z$1.object({
-  type: z$1.literal("reasoning"),
-  text: z$1.string(),
+var reasoningPartSchema3 = z.object({
+  type: z.literal("reasoning"),
+  text: z.string(),
   providerOptions: providerMetadataSchema3.optional()
 });
-var toolCallPartSchema3 = z$1.object({
-  type: z$1.literal("tool-call"),
-  toolCallId: z$1.string(),
-  toolName: z$1.string(),
-  input: z$1.unknown(),
+var toolCallPartSchema3 = z.object({
+  type: z.literal("tool-call"),
+  toolCallId: z.string(),
+  toolName: z.string(),
+  input: z.unknown(),
   providerOptions: providerMetadataSchema3.optional(),
-  providerExecuted: z$1.boolean().optional()
+  providerExecuted: z.boolean().optional()
 });
-var outputSchema2 = z$1.discriminatedUnion("type", [
-  z$1.object({
-    type: z$1.literal("text"),
-    value: z$1.string()
+var outputSchema2 = z.discriminatedUnion("type", [
+  z.object({
+    type: z.literal("text"),
+    value: z.string()
   }),
-  z$1.object({
-    type: z$1.literal("json"),
+  z.object({
+    type: z.literal("json"),
     value: jsonValueSchema3
   }),
-  z$1.object({
-    type: z$1.literal("error-text"),
-    value: z$1.string()
+  z.object({
+    type: z.literal("error-text"),
+    value: z.string()
   }),
-  z$1.object({
-    type: z$1.literal("error-json"),
+  z.object({
+    type: z.literal("error-json"),
     value: jsonValueSchema3
   }),
-  z$1.object({
-    type: z$1.literal("content"),
-    value: z$1.array(
-      z$1.union([
-        z$1.object({
-          type: z$1.literal("text"),
-          text: z$1.string()
+  z.object({
+    type: z.literal("content"),
+    value: z.array(
+      z.union([
+        z.object({
+          type: z.literal("text"),
+          text: z.string()
         }),
-        z$1.object({
-          type: z$1.literal("media"),
-          data: z$1.string(),
-          mediaType: z$1.string()
+        z.object({
+          type: z.literal("media"),
+          data: z.string(),
+          mediaType: z.string()
         })
       ])
     )
   })
 ]);
-var toolResultPartSchema3 = z$1.object({
-  type: z$1.literal("tool-result"),
-  toolCallId: z$1.string(),
-  toolName: z$1.string(),
+var toolResultPartSchema3 = z.object({
+  type: z.literal("tool-result"),
+  toolCallId: z.string(),
+  toolName: z.string(),
   output: outputSchema2,
   providerOptions: providerMetadataSchema3.optional()
 });
-var systemModelMessageSchema2 = z$1.object(
+var systemModelMessageSchema2 = z.object(
   {
-    role: z$1.literal("system"),
-    content: z$1.string(),
+    role: z.literal("system"),
+    content: z.string(),
     providerOptions: providerMetadataSchema3.optional()
   }
 );
-var userModelMessageSchema2 = z$1.object({
-  role: z$1.literal("user"),
-  content: z$1.union([
-    z$1.string(),
-    z$1.array(z$1.union([textPartSchema3, imagePartSchema3, filePartSchema3]))
+var userModelMessageSchema2 = z.object({
+  role: z.literal("user"),
+  content: z.union([
+    z.string(),
+    z.array(z.union([textPartSchema3, imagePartSchema3, filePartSchema3]))
   ]),
   providerOptions: providerMetadataSchema3.optional()
 });
-var assistantModelMessageSchema2 = z$1.object({
-  role: z$1.literal("assistant"),
-  content: z$1.union([
-    z$1.string(),
-    z$1.array(
-      z$1.union([
+var assistantModelMessageSchema2 = z.object({
+  role: z.literal("assistant"),
+  content: z.union([
+    z.string(),
+    z.array(
+      z.union([
         textPartSchema3,
         filePartSchema3,
         reasoningPartSchema3,
@@ -20895,12 +21596,12 @@ var assistantModelMessageSchema2 = z$1.object({
   ]),
   providerOptions: providerMetadataSchema3.optional()
 });
-var toolModelMessageSchema2 = z$1.object({
-  role: z$1.literal("tool"),
-  content: z$1.array(toolResultPartSchema3),
+var toolModelMessageSchema2 = z.object({
+  role: z.literal("tool"),
+  content: z.array(toolResultPartSchema3),
   providerOptions: providerMetadataSchema3.optional()
 });
-z$1.union([
+z.union([
   systemModelMessageSchema2,
   userModelMessageSchema2,
   assistantModelMessageSchema2,
@@ -21322,125 +22023,125 @@ var object3 = ({
     }
   };
 };
-var ClientOrServerImplementationSchema3 = z$1.looseObject({
-  name: z$1.string(),
-  version: z$1.string()
+var ClientOrServerImplementationSchema3 = z.looseObject({
+  name: z.string(),
+  version: z.string()
 });
-var BaseParamsSchema3 = z$1.looseObject({
-  _meta: z$1.optional(z$1.object({}).loose())
+var BaseParamsSchema3 = z.looseObject({
+  _meta: z.optional(z.object({}).loose())
 });
 var ResultSchema3 = BaseParamsSchema3;
-var RequestSchema3 = z$1.object({
-  method: z$1.string(),
-  params: z$1.optional(BaseParamsSchema3)
+var RequestSchema3 = z.object({
+  method: z.string(),
+  params: z.optional(BaseParamsSchema3)
 });
-var ServerCapabilitiesSchema3 = z$1.looseObject({
-  experimental: z$1.optional(z$1.object({}).loose()),
-  logging: z$1.optional(z$1.object({}).loose()),
-  prompts: z$1.optional(
-    z$1.looseObject({
-      listChanged: z$1.optional(z$1.boolean())
+var ServerCapabilitiesSchema3 = z.looseObject({
+  experimental: z.optional(z.object({}).loose()),
+  logging: z.optional(z.object({}).loose()),
+  prompts: z.optional(
+    z.looseObject({
+      listChanged: z.optional(z.boolean())
     })
   ),
-  resources: z$1.optional(
-    z$1.looseObject({
-      subscribe: z$1.optional(z$1.boolean()),
-      listChanged: z$1.optional(z$1.boolean())
+  resources: z.optional(
+    z.looseObject({
+      subscribe: z.optional(z.boolean()),
+      listChanged: z.optional(z.boolean())
     })
   ),
-  tools: z$1.optional(
-    z$1.looseObject({
-      listChanged: z$1.optional(z$1.boolean())
+  tools: z.optional(
+    z.looseObject({
+      listChanged: z.optional(z.boolean())
     })
   )
 });
 ResultSchema3.extend({
-  protocolVersion: z$1.string(),
+  protocolVersion: z.string(),
   capabilities: ServerCapabilitiesSchema3,
   serverInfo: ClientOrServerImplementationSchema3,
-  instructions: z$1.optional(z$1.string())
+  instructions: z.optional(z.string())
 });
 var PaginatedResultSchema3 = ResultSchema3.extend({
-  nextCursor: z$1.optional(z$1.string())
+  nextCursor: z.optional(z.string())
 });
-var ToolSchema3 = z$1.object({
-  name: z$1.string(),
-  description: z$1.optional(z$1.string()),
-  inputSchema: z$1.object({
-    type: z$1.literal("object"),
-    properties: z$1.optional(z$1.object({}).loose())
+var ToolSchema3 = z.object({
+  name: z.string(),
+  description: z.optional(z.string()),
+  inputSchema: z.object({
+    type: z.literal("object"),
+    properties: z.optional(z.object({}).loose())
   }).loose()
 }).loose();
 PaginatedResultSchema3.extend({
-  tools: z$1.array(ToolSchema3)
+  tools: z.array(ToolSchema3)
 });
-var TextContentSchema3 = z$1.object({
-  type: z$1.literal("text"),
-  text: z$1.string()
+var TextContentSchema3 = z.object({
+  type: z.literal("text"),
+  text: z.string()
 }).loose();
-var ImageContentSchema3 = z$1.object({
-  type: z$1.literal("image"),
-  data: z$1.base64(),
-  mimeType: z$1.string()
+var ImageContentSchema3 = z.object({
+  type: z.literal("image"),
+  data: z.base64(),
+  mimeType: z.string()
 }).loose();
-var ResourceContentsSchema3 = z$1.object({
+var ResourceContentsSchema3 = z.object({
   /**
    * The URI of this resource.
    */
-  uri: z$1.string(),
+  uri: z.string(),
   /**
    * The MIME type of this resource, if known.
    */
-  mimeType: z$1.optional(z$1.string())
+  mimeType: z.optional(z.string())
 }).loose();
 var TextResourceContentsSchema3 = ResourceContentsSchema3.extend({
-  text: z$1.string()
+  text: z.string()
 });
 var BlobResourceContentsSchema3 = ResourceContentsSchema3.extend({
-  blob: z$1.base64()
+  blob: z.base64()
 });
-var EmbeddedResourceSchema3 = z$1.object({
-  type: z$1.literal("resource"),
-  resource: z$1.union([TextResourceContentsSchema3, BlobResourceContentsSchema3])
+var EmbeddedResourceSchema3 = z.object({
+  type: z.literal("resource"),
+  resource: z.union([TextResourceContentsSchema3, BlobResourceContentsSchema3])
 }).loose();
 ResultSchema3.extend({
-  content: z$1.array(
-    z$1.union([TextContentSchema3, ImageContentSchema3, EmbeddedResourceSchema3])
+  content: z.array(
+    z.union([TextContentSchema3, ImageContentSchema3, EmbeddedResourceSchema3])
   ),
-  isError: z$1.boolean().default(false).optional()
+  isError: z.boolean().default(false).optional()
 }).or(
   ResultSchema3.extend({
-    toolResult: z$1.unknown()
+    toolResult: z.unknown()
   })
 );
 var JSONRPC_VERSION3 = "2.0";
-var JSONRPCRequestSchema3 = z$1.object({
-  jsonrpc: z$1.literal(JSONRPC_VERSION3),
-  id: z$1.union([z$1.string(), z$1.number().int()])
+var JSONRPCRequestSchema3 = z.object({
+  jsonrpc: z.literal(JSONRPC_VERSION3),
+  id: z.union([z.string(), z.number().int()])
 }).merge(RequestSchema3).strict();
-var JSONRPCResponseSchema3 = z$1.object({
-  jsonrpc: z$1.literal(JSONRPC_VERSION3),
-  id: z$1.union([z$1.string(), z$1.number().int()]),
+var JSONRPCResponseSchema3 = z.object({
+  jsonrpc: z.literal(JSONRPC_VERSION3),
+  id: z.union([z.string(), z.number().int()]),
   result: ResultSchema3
 }).strict();
-var JSONRPCErrorSchema3 = z$1.object({
-  jsonrpc: z$1.literal(JSONRPC_VERSION3),
-  id: z$1.union([z$1.string(), z$1.number().int()]),
-  error: z$1.object({
-    code: z$1.number().int(),
-    message: z$1.string(),
-    data: z$1.optional(z$1.unknown())
+var JSONRPCErrorSchema3 = z.object({
+  jsonrpc: z.literal(JSONRPC_VERSION3),
+  id: z.union([z.string(), z.number().int()]),
+  error: z.object({
+    code: z.number().int(),
+    message: z.string(),
+    data: z.optional(z.unknown())
   })
 }).strict();
-var JSONRPCNotificationSchema3 = z$1.object({
-  jsonrpc: z$1.literal(JSONRPC_VERSION3)
+var JSONRPCNotificationSchema3 = z.object({
+  jsonrpc: z.literal(JSONRPC_VERSION3)
 }).merge(
-  z$1.object({
-    method: z$1.string(),
-    params: z$1.optional(BaseParamsSchema3)
+  z.object({
+    method: z.string(),
+    params: z.optional(BaseParamsSchema3)
   })
 ).strict();
-z$1.union([
+z.union([
   JSONRPCRequestSchema3,
   JSONRPCNotificationSchema3,
   JSONRPCResponseSchema3,
@@ -24726,7 +25427,7 @@ ${additionalInstructions}`;
     return super.generate(messages, enhancedOptions);
   }
 };
-var cloneTemplateStep = createStep({
+var cloneTemplateStep = createStep$1({
   id: "clone-template",
   description: "Clone the template repository to a temporary directory at the specified ref",
   inputSchema: AgentBuilderInputSchema,
@@ -24767,7 +25468,7 @@ var cloneTemplateStep = createStep({
     }
   }
 });
-var analyzePackageStep = createStep({
+var analyzePackageStep = createStep$1({
   id: "analyze-package",
   description: "Analyze the template package.json to extract dependency information",
   inputSchema: CloneTemplateResultSchema,
@@ -24806,7 +25507,7 @@ var analyzePackageStep = createStep({
     }
   }
 });
-var discoverUnitsStep = createStep({
+var discoverUnitsStep = createStep$1({
   id: "discover-units",
   description: "Discover template units by analyzing the templates directory structure",
   inputSchema: CloneTemplateResultSchema,
@@ -24932,7 +25633,7 @@ Return the actual exported names of the units, as well as the file names.`,
     }
   }
 });
-var orderUnitsStep = createStep({
+var orderUnitsStep = createStep$1({
   id: "order-units",
   description: "Sort units in topological order based on kind weights",
   inputSchema: DiscoveryResultSchema,
@@ -24950,7 +25651,7 @@ var orderUnitsStep = createStep({
     };
   }
 });
-var prepareBranchStep = createStep({
+var prepareBranchStep = createStep$1({
   id: "prepare-branch",
   description: "Create or switch to integration branch before modifications",
   inputSchema: PrepareBranchInputSchema,
@@ -24975,7 +25676,7 @@ var prepareBranchStep = createStep({
     }
   }
 });
-var packageMergeStep = createStep({
+var packageMergeStep = createStep$1({
   id: "package-merge",
   description: "Merge template package.json dependencies into target project",
   inputSchema: PackageMergeInputSchema,
@@ -25052,7 +25753,7 @@ var packageMergeStep = createStep({
     }
   }
 });
-var installStep = createStep({
+var installStep = createStep$1({
   id: "install",
   description: "Install packages based on merged package.json",
   inputSchema: InstallInputSchema,
@@ -25080,7 +25781,7 @@ var installStep = createStep({
     }
   }
 });
-var programmaticFileCopyStep = createStep({
+var programmaticFileCopyStep = createStep$1({
   id: "programmatic-file-copy",
   description: "Programmatically copy template files to target project based on ordered units",
   inputSchema: FileCopyInputSchema,
@@ -25432,7 +26133,7 @@ var programmaticFileCopyStep = createStep({
     }
   }
 });
-var intelligentMergeStep = createStep({
+var intelligentMergeStep = createStep$1({
   id: "intelligent-merge",
   description: "Use AgentBuilder to intelligently merge template files",
   inputSchema: IntelligentMergeInputSchema,
@@ -25700,7 +26401,7 @@ Start by listing your tasks and work through them systematically!
     }
   }
 });
-var validationAndFixStep = createStep({
+var validationAndFixStep = createStep$1({
   id: "validation-and-fix",
   description: "Validate the merged template code and fix any issues using a specialized agent",
   inputSchema: ValidationFixInputSchema,
@@ -25966,7 +26667,7 @@ Previous iterations may have fixed some issues, so start by re-running validateC
     }
   }
 });
-var agentBuilderTemplateWorkflow = createWorkflow({
+var agentBuilderTemplateWorkflow = createWorkflow$1({
   id: "agent-builder-template",
   description: "Merges a Mastra template repository into the current project using intelligent AgentBuilder-powered merging",
   inputSchema: AgentBuilderInputSchema,
@@ -26417,7 +27118,7 @@ var TaskApprovalResumeSchema = z.object({
   approved: z.boolean(),
   modifications: z.string().optional()
 });
-var planningIterationStep = createStep({
+var planningIterationStep = createStep$1({
   id: "planning-iteration",
   description: "Create or refine task plan with user input",
   inputSchema: PlanningIterationInputSchema,
@@ -26556,7 +27257,7 @@ var planningIterationStep = createStep({
     }
   }
 });
-var taskApprovalStep = createStep({
+var taskApprovalStep = createStep$1({
   id: "task-approval",
   description: "Get user approval for the final task list",
   inputSchema: PlanningIterationResultSchema,
@@ -26596,7 +27297,7 @@ ${tasks.map((task, i) => `${i + 1}. [${task.priority.toUpperCase()}] ${task.cont
     }
   }
 });
-var planningAndApprovalWorkflow = createWorkflow({
+var planningAndApprovalWorkflow = createWorkflow$1({
   id: "planning-and-approval",
   description: "Handle iterative planning with questions and task list approval",
   inputSchema: PlanningIterationInputSchema,
@@ -27048,7 +27749,7 @@ var restrictedTaskManager = createTool({
     return await AgentBuilderDefaults.manageTaskList(adaptedContext);
   }
 });
-var workflowDiscoveryStep = createStep({
+var workflowDiscoveryStep = createStep$1({
   id: "workflow-discovery",
   description: "Discover existing workflows in the project",
   inputSchema: WorkflowBuilderInputSchema,
@@ -27107,7 +27808,7 @@ var workflowDiscoveryStep = createStep({
     }
   }
 });
-var projectDiscoveryStep = createStep({
+var projectDiscoveryStep = createStep$1({
   id: "project-discovery",
   description: "Analyze the project structure and setup",
   inputSchema: WorkflowDiscoveryResultSchema,
@@ -27169,7 +27870,7 @@ var projectDiscoveryStep = createStep({
     }
   }
 });
-var workflowResearchStep = createStep({
+var workflowResearchStep = createStep$1({
   id: "workflow-research",
   description: "Research Mastra workflows and gather relevant documentation",
   inputSchema: ProjectDiscoveryResultSchema,
@@ -27234,7 +27935,7 @@ var workflowResearchStep = createStep({
     }
   }
 });
-var taskExecutionStep = createStep({
+var taskExecutionStep = createStep$1({
   id: "task-execution",
   description: "Execute the approved task list to create or edit the workflow",
   inputSchema: TaskExecutionInputSchema,
@@ -27452,7 +28153,7 @@ ${workflowBuilderPrompts.validation.instructions}`;
     }
   }
 });
-var workflowBuilderWorkflow = createWorkflow({
+var workflowBuilderWorkflow = createWorkflow$1({
   id: "workflow-builder",
   description: "Create or edit Mastra workflows using AI-powered assistance with iterative planning",
   inputSchema: WorkflowBuilderInputSchema,
@@ -30416,7 +31117,7 @@ var buildOutgoingHttpHeaders = (headers) => {
 var X_ALREADY_SENT = "x-hono-already-sent";
 var webFetch = global.fetch;
 if (typeof global.crypto === "undefined") {
-  global.crypto = crypto$1;
+  global.crypto = require$$3;
 }
 global.fetch = (info, init) => {
   init = {
@@ -42200,60 +42901,56 @@ async function createNodeServer(mastra, options = { tools: {} }) {
 }
 
 // @ts-ignore
-// @ts-ignore
-// @ts-ignore
-await createNodeServer(mastra, {
-  playground: true,
-  isDev: true,
-  tools: getToolExports(tools),
-});
+    await createNodeServer(mastra, { tools: getToolExports(tools) });
 
-registerHook(AvailableHooks.ON_GENERATION, ({ input, output, metric, runId, agentName, instructions }) => {
-  evaluate({
-    agentName,
-    input,
-    metric,
-    output,
-    runId,
-    globalRunId: runId,
-    instructions,
-  });
-});
-
-if (mastra.getStorage()) {
-  mastra.__registerInternalWorkflow(scoreTracesWorkflow);
-}
-
-registerHook(AvailableHooks.ON_EVALUATION, async traceObject => {
-  const storage = mastra.getStorage();
-  if (storage) {
-    // Check for required fields
-    const logger = mastra?.getLogger();
-    const areFieldsValid = checkEvalStorageFields(traceObject, logger);
-    if (!areFieldsValid) return;
-
-    await storage.insert({
-      tableName: TABLE_EVALS,
-      record: {
-        input: traceObject.input,
-        output: traceObject.output,
-        result: JSON.stringify(traceObject.result || {}),
-        agent_name: traceObject.agentName,
-        metric_name: traceObject.metricName,
-        instructions: traceObject.instructions,
-        test_info: null,
-        global_run_id: traceObject.globalRunId,
-        run_id: traceObject.runId,
-        created_at: new Date().toISOString(),
-      },
+    registerHook(AvailableHooks.ON_GENERATION, ({ input, output, metric, runId, agentName, instructions }) => {
+      evaluate({
+        agentName,
+        input,
+        metric,
+        output,
+        runId,
+        globalRunId: runId,
+        instructions,
+      });
     });
-  }
-});
+
+    if (mastra.getStorage()) {
+      // start storage init in the background
+      mastra.getStorage().init();
+      mastra.__registerInternalWorkflow(scoreTracesWorkflow);
+    }
+
+    registerHook(AvailableHooks.ON_EVALUATION, async traceObject => {
+      const storage = mastra.getStorage();
+      if (storage) {
+        // Check for required fields
+        const logger = mastra?.getLogger();
+        const areFieldsValid = checkEvalStorageFields(traceObject, logger);
+        if (!areFieldsValid) return;
+
+        await storage.insert({
+          tableName: TABLE_EVALS,
+          record: {
+            input: traceObject.input,
+            output: traceObject.output,
+            result: JSON.stringify(traceObject.result || {}),
+            agent_name: traceObject.agentName,
+            metric_name: traceObject.metricName,
+            instructions: traceObject.instructions,
+            test_info: null,
+            global_run_id: traceObject.globalRunId,
+            run_id: traceObject.runId,
+            created_at: new Date().toISOString(),
+          },
+        });
+      }
+    });
 
 var distYREX2TJT = /*#__PURE__*/Object.freeze({
-    __proto__: null,
-    createOpenAI: createOpenAI,
-    openai: openai
+  __proto__: null,
+  createOpenAI: createOpenAI,
+  openai: openai
 });
 
 export { InvalidResponseDataError as I, NoSuchModelError$1 as N, TooManyEmbeddingValuesForCallError as T, UnsupportedFunctionalityError as U, __commonJS as _, __require as a, resolve$1 as b, combineHeaders$1 as c, postJsonToApi$1 as d, createJsonResponseHandler$1 as e, createEventSourceResponseHandler$1 as f, convertUint8ArrayToBase64 as g, createJsonErrorResponseHandler$1 as h, generateId as i, isParsableJson as j, convertBase64ToUint8Array as k, loadApiKey as l, postFormDataToApi as m, parseProviderOptions as p, require_token_error as r, withoutTrailingSlash$1 as w };
