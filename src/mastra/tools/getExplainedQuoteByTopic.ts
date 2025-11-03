@@ -1,96 +1,71 @@
-import { createTool, ToolExecutionContext } from "@mastra/core/tools";
+import { createTool } from "@mastra/core/tools";
 import { z } from "zod";
+// import "dotenv/config";
 
 const OPENROUTER_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions";
 
-// Optional timeout helper
-const withTimeout = (promise: Promise<any>, ms = 8000) =>
-  Promise.race([
-    promise,
-    new Promise((_, reject) => setTimeout(() => reject(new Error("Timeout")), ms)),
-  ]);
 
-// Explicit interface for our tool's context
-interface TopicContext {
-  args: { topic: string };
+// Map topics to Bible verses
+function topicMatch(topic:string) {
+const topicMap: Record<string, string> = {
+  strength: "Philippians 4:13",
+  hope: "Jeremiah 29:11",
+  love: "1 Corinthians 13:4-7",
+  peace: "John 14:27",
+  faith: "Hebrews 11:1",
+  forgiveness: "Ephesians 4:32",
+};
+return topicMap[topic] || "Unknown"
 }
-
-const inputSchema = z.object({
-  topic: z.string().describe("The user's topic, e.g., 'hope', 'love', 'faith'"),
-});
 
 export const getExplainedQuoteByTopic = createTool({
   id: "getExplainedQuoteByTopic",
-  description: "Finds a relevant Bible verse and explains it.",
-  inputSchema,
+  description: "Fetches a Bible verse based on topic and returns an explanation.",
+    inputSchema: z.object({
+  userTopic: z.string().describe("Bible verse"),
+}),
   outputSchema: z.object({ text: z.string() }),
-  execute: async (context: ToolExecutionContext<typeof inputSchema> & TopicContext) => {
-    // ✅ Access topic safely
-    const topic = context.args.topic?.toLowerCase()?.trim();
-    console.log("🔍 User input:", context.args);
-    console.log("🔍 Extracted topic:", topic);
+  execute: async ({context}) => {
+    const topic = `${context.userTopic}`
 
-    if (!topic) {
-      return {
-        text: "Please ask for a verse with a topic, like 'a verse about hope'.",
-      };
+    // const verseRef = topicMatch(topic);
+    //  if (verseRef == `unknown`) {
+    //   return { text: `Sorry, no verse found for "${topic || ''}".` };
+    // }
+
+    // Fetch the verse from Bible API
+    const verseResponse = await fetch(`https://bible-api.com/${encodeURIComponent(topic)}`);
+    if (!verseResponse.ok) {
+      return { text: `Failed to fetch verse for "${topic}".` };
+    }
+    const verseData = await verseResponse.json();
+    const verseText = verseData.text?.trim() || "";
+    const reference = verseData.reference || topic;
+
+    // Generate explanation using LLM
+    const apiKey = process.env.OPENROUTER_API_KEY;
+    if (!apiKey) {
+      return { text: `Verse: ${reference}\n${verseText}\n(Explanation unavailable — missing API key)` };
     }
 
-    const topicMap: Record<string, string> = {
-      strength: "Philippians 4:13",
-      hope: "Jeremiah 29:11",
-      love: "1 Corinthians 13:4-7",
-      peace: "John 14:27",
-      faith: "Hebrews 11:1",
-      forgiveness: "Ephesians 4:32",
+    const prompt = `Explain this Bible verse briefly (1–3 sentences) in an uplifting way:\n\nVerse: ${reference}\nText: "${verseText}"`;
+    const llmResponse = await fetch(OPENROUTER_ENDPOINT, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        messages: [{ role: "user", content: prompt }],
+      }),
+    });
+
+    const llmData = await llmResponse.json();
+    const explanation = llmData?.choices?.[0]?.message?.content?.trim() || "No explanation available.";
+
+    return {
+      text: `**${reference}**\n*${verseText}*\n\n**Meaning:**\n${explanation}`,
     };
-
-    const verseRef = topicMap[topic];
-    if (!verseRef) return { text: `Sorry, no verse found for "${topic}".` };
-
-    try {
-      // 🕊️ Fetch Bible verse
-      const quoteResponse = await withTimeout(
-        fetch(`https://bible-api.com/${encodeURIComponent(verseRef)}`)
-      );
-      if (!quoteResponse.ok) throw new Error("Bible API failed");
-      const quoteData = await quoteResponse.json();
-      const verse = quoteData.reference;
-      const text = quoteData.text.trim();
-
-      const key = process.env.OPENROUTER_API_KEY;
-      if (!key)
-        return {
-          text: `Verse: ${verse}\n${text}\n(Explanation unavailable — missing API key)`,
-        };
-
-      // 🧠 Generate explanation from LLM
-      const prompt = `Explain this verse briefly (1–3 sentences) in an uplifting way:\n\nVerse: ${verse}\nText: "${text}"`;
-
-      const llmResponse = await withTimeout(
-        fetch(OPENROUTER_ENDPOINT, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${key}`,
-          },
-          body: JSON.stringify({
-            model: "gpt-4o-mini",
-            messages: [{ role: "user", content: prompt }],
-          }),
-        })
-      );
-
-      if (!llmResponse.ok) throw new Error("LLM provider failed");
-      const llmData = await llmResponse.json();
-      const explanation =
-        llmData?.choices?.[0]?.message?.content?.trim() || "No explanation generated.";
-
-      const finalText = `Here's a verse about **${topic}**:\n\n**${verse}**\n*${text}*\n\n**Meaning:**\n${explanation}`;
-      return { text: finalText };
-    } catch (error: any) {
-      console.error("❌ Error:", error.message);
-      return { text: "Sorry, an error occurred while processing your request." };
-    }
   },
 });
