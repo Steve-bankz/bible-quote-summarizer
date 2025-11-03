@@ -4,9 +4,9 @@ import { TABLE_EVALS } from '@mastra/core/storage';
 import { scoreTraces, scoreTracesWorkflow } from '@mastra/core/scores/scoreTraces';
 import { generateEmptyFromSchema, checkEvalStorageFields } from '@mastra/core/utils';
 import { Mastra } from '@mastra/core/mastra';
-import { Agent, tryGenerateWithJsonFallback, tryStreamWithJsonFallback, MessageList, convertMessages } from '@mastra/core/agent';
-import { createTool, isVercelTool, Tool } from '@mastra/core/tools';
+import { createWorkflow, createStep } from '@mastra/core/workflows';
 import { z, ZodObject, ZodFirstPartyTypeKind } from 'zod';
+import { createTool, isVercelTool, Tool } from '@mastra/core/tools';
 import crypto$1, { randomUUID } from 'crypto';
 import { readdir, readFile, mkdtemp, rm, writeFile, mkdir, copyFile, stat } from 'fs/promises';
 import * as https from 'https';
@@ -30,6 +30,7 @@ import { bodyLimit } from 'hono/body-limit';
 import { MastraError, ErrorCategory, ErrorDomain, getErrorFromUnknown } from '@mastra/core/error';
 import { ModelRouterLanguageModel, PROVIDER_REGISTRY, getProviderConfig } from '@mastra/core/llm';
 import { ChunkFrom } from '@mastra/core/stream';
+import { Agent, tryGenerateWithJsonFallback, tryStreamWithJsonFallback, MessageList, convertMessages } from '@mastra/core/agent';
 import util, { promisify } from 'util';
 import { Buffer as Buffer$1 } from 'buffer';
 import { AISpanType } from '@mastra/core/ai-tracing';
@@ -43,77 +44,57 @@ import { ZodFirstPartyTypeKind as ZodFirstPartyTypeKind$1 } from 'zod/v3';
 import { spawn as spawn$1, execFile as execFile$1, exec as exec$1 } from 'child_process';
 import { createRequire } from 'module';
 import { tmpdir } from 'os';
-import { createWorkflow, createStep } from '@mastra/core/workflows';
 import { tools } from '#tools';
 
-const OPENROUTER_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions";
 const getExplainedQuoteByTopic = createTool({
   id: "getExplainedQuoteByTopic",
-  description: "Takes a user's request, finds a relevant verse, and explains it.",
-  inputSchema: z.string().describe("The user's full request, e.g., 'a verse about hope'"),
-  outputSchema: z.object({ text: z.string() }),
-  execute: async (context) => {
-    const userMessage = context.context || "";
-    let topic = "";
-    const parts = userMessage.toLowerCase().split("about ");
-    if (parts.length > 1) topic = parts[1].trim();
-    if (!topic) return { text: "Please ask for a verse with a topic, like 'a verse about hope'." };
-    const topicMap = {
-      strength: "Philippians 4:13",
-      hope: "Jeremiah 29:11",
-      love: "1 Corinthians 13:4-7",
-      peace: "John 14:27",
-      faith: "Hebrews 11:1",
-      forgiveness: "Ephesians 4:32"
-    };
-    const verseRef = topicMap[topic];
-    if (!verseRef) return { text: `Sorry, no verse for "${topic}".` };
-    try {
-      const quoteResponse = await fetch(`https://bible-api.com/${encodeURIComponent(verseRef)}`);
-      if (!quoteResponse.ok) throw new Error(`Bible API failed.`);
-      const quoteData = await quoteResponse.json();
-      const verse = quoteData.reference;
-      const text = quoteData.text.trim();
-      const key = process.env.OPENROUTER_API_KEY;
-      if (!key) return { text: `Verse: ${verse}
-${text}
-(Explanation unavailable)` };
-      const prompt = `Explain this verse briefly (1-3 sentences) in an uplifting way:
-
-Verse: ${verse}
-Text: "${text}"`;
-      const llmResponse = await fetch(OPENROUTER_ENDPOINT, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
-        body: JSON.stringify({ model: "gpt-4o-mini", messages: [{ role: "user", content: prompt }] })
-      });
-      if (!llmResponse.ok) throw new Error(`LLM provider failed.`);
-      const llmData = await llmResponse.json();
-      const explanation = llmData?.choices?.[0]?.message?.content?.trim() || "No explanation generated.";
-      const finalText = `Here's a verse about **${topic}**:
-
-**${verse}**
-*${text}*
-
-**Meaning:**
-${explanation}`;
-      return { text: finalText };
-    } catch (error) {
-      return { text: "Sorry, an error occurred while processing your request." };
-    }
+  description: "Finds a relevant Bible verse and explains it, given a clean topic.",
+  inputSchema: z.object({
+    topic: z.string()
+  }),
+  outputSchema: z.object({
+    text: z.string()
+  }),
+  execute: async (input) => {
   }
 });
-const explainedQuoteAgent = new Agent({
-  id: "explainedQuoteAgent",
-  name: "Explained Quote Agent",
-  instructions: "A helpful AI agent that takes a topic from a user, finds a relevant Bible verse, and provides an explanation.",
-  model: { providerId: "openrouter", modelId: "gpt-4o-mini", apiKey: process.env.OPENROUTER_API_KEY },
-  tools: { getExplainedQuoteByTopic }
+
+const bibleQuoteWorkflow = createWorkflow({
+  id: "bibleQuoteWorkflow",
+  description: "A workflow that takes a topic, cleans it, and uses a tool to get an explained Bible verse.",
+  inputSchema: z.object({
+    topic: z.string().describe("The user's topic, e.g., 'hope', 'love', 'faith'")
+  }),
+  steps: [
+    {
+      id: "normalizeInput",
+      description: "Cleans the input topic by making it lowercase and trimming whitespace.",
+      // ✅ CORRECT: Define the input mapping for this step.
+      // This tells the step to expect an object like { topic: string }
+      // which it gets from the main workflow input.
+      input: (input) => ({ topic: input.topic }),
+      // ✅ CORRECT: Use the 'run' property for the inline script.
+      // The 'run' function IS the script. It receives the data defined
+      // by the 'input' property above.
+      run: async (input) => {
+        const cleanTopic = input.topic?.toLowerCase()?.trim() || "";
+        console.log(`[Workflow] Step 1: Normalized topic to "${cleanTopic}"`);
+        return { topic: cleanTopic };
+      }
+    },
+    {
+      id: "getExplainedQuote",
+      description: "Calls the dedicated tool to fetch the Bible verse and its explanation.",
+      tool: getExplainedQuoteByTopic,
+      // This step's input comes from the output of the 'normalizeInput' step.
+      input: (steps) => ({ topic: steps.normalizeInput.output.topic })
+    }
+  ],
+  output: (steps) => steps.getExplainedQuote.output
 });
 
 const mastra = new Mastra({
-  // minimal config; add provider/env as needed
-  agents: { explainedQuoteAgent }
+  workflows: { bibleQuoteWorkflow }
 });
 
 // src/server/a2a/store.ts
@@ -40469,8 +40450,8 @@ var require_token_util = __commonJS({
 var tokenUtilE5QO2RCL = require_token_util();
 
 var tokenUtilE5QO2RCL$1 = /*#__PURE__*/Object.freeze({
-    __proto__: null,
-    default: tokenUtilE5QO2RCL
+  __proto__: null,
+  default: tokenUtilE5QO2RCL
 });
 
 // ../../node_modules/.pnpm/@vercel+oidc@3.0.3/node_modules/@vercel/oidc/dist/token.js
@@ -40529,14 +40510,14 @@ var require_token = __commonJS({
 var tokenC3IMNCC4 = require_token();
 
 var tokenC3IMNCC4$1 = /*#__PURE__*/Object.freeze({
-    __proto__: null,
-    default: tokenC3IMNCC4
+  __proto__: null,
+  default: tokenC3IMNCC4
 });
 
 var distYREX2TJT = /*#__PURE__*/Object.freeze({
-    __proto__: null,
-    createOpenAI: createOpenAI,
-    openai: openai
+  __proto__: null,
+  createOpenAI: createOpenAI,
+  openai: openai
 });
 
 var anthropicErrorDataSchema = z.object({
@@ -41681,9 +41662,9 @@ function createAnthropic(options = {}) {
 var anthropic = createAnthropic();
 
 var distX7XR3M3Z = /*#__PURE__*/Object.freeze({
-    __proto__: null,
-    anthropic: anthropic,
-    createAnthropic: createAnthropic
+  __proto__: null,
+  anthropic: anthropic,
+  createAnthropic: createAnthropic
 });
 
 function convertToGroqChatMessages(prompt) {
@@ -42442,9 +42423,9 @@ function createGroq(options = {}) {
 var groq = createGroq();
 
 var distXVBSOGFK = /*#__PURE__*/Object.freeze({
-    __proto__: null,
-    createGroq: createGroq,
-    groq: groq
+  __proto__: null,
+  createGroq: createGroq,
+  groq: groq
 });
 
 function getOpenAIMetadata(message) {
@@ -43367,9 +43348,9 @@ function createXai(options = {}) {
 var xai = createXai();
 
 var distR7WYX6LC = /*#__PURE__*/Object.freeze({
-    __proto__: null,
-    createXai: createXai,
-    xai: xai
+  __proto__: null,
+  createXai: createXai,
+  xai: xai
 });
 
 function convertJSONSchemaToOpenAPISchema(jsonSchema) {
@@ -44304,7 +44285,7 @@ function createGoogleGenerativeAI(options = {}) {
 var google = createGoogleGenerativeAI();
 
 var distPQZUVLPC = /*#__PURE__*/Object.freeze({
-    __proto__: null,
-    createGoogleGenerativeAI: createGoogleGenerativeAI,
-    google: google
+  __proto__: null,
+  createGoogleGenerativeAI: createGoogleGenerativeAI,
+  google: google
 });

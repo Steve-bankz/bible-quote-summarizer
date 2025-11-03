@@ -6,7 +6,7 @@ import { r as registerHook } from './hooks.mjs';
 import { s as setupAITracing, g as getAllAITracing, a as shutdownAITracingRegistry } from './ai-tracing.mjs';
 import { M as MastraError } from './error.mjs';
 import { C as ConsoleLogger, L as LogLevel } from './_commonjsHelpers.mjs';
-import { _ as __decoratorStart, b as __decorateElement, c as __runInitializers } from './workflows.mjs';
+import { _ as __decoratorStart, b as __decorateElement, c as __runInitializers } from './agent.mjs';
 import { randomUUID } from 'crypto';
 import EventEmitter from 'events';
 import pMap from './index.mjs';
