@@ -18,7 +18,7 @@ const getExplainedQuoteByTopic = createTool({
   }),
   outputSchema: z.object({ text: z.string() }),
   execute: async (context: any) => {
-    const topic = context.args?.topic?.toLowerCase()?.trim();
+    const topic = context.input?.topic?.toLowerCase()?.trim();
     console.log("🔍 User input:", context.args);
     console.log("🔍 Extracted topic:", topic);
 
