@@ -12,13 +12,12 @@ const withTimeout = (promise: Promise<any>, ms = 8000) =>
 
 const getExplainedQuoteByTopic = createTool({
   id: "getExplainedQuoteByTopic",
-  description: "Takes a user's request, finds a relevant verse, and explains it.",
+  description: "Finds a relevant Bible verse and explains it.",
   inputSchema: z.object({
-    topic: z.string().describe("The user's full request, e.g., 'a verse about hope'"),
+    topic: z.string().describe("The user's topic, e.g., 'hope', 'love', 'faith'"),
   }),
   outputSchema: z.object({ text: z.string() }),
   execute: async (context: any) => {
-    // ✅ Correct way to access the topic argument in Mastra
     const topic = context.args?.topic?.toLowerCase()?.trim();
     console.log("🔍 User input:", context.args);
     console.log("🔍 Extracted topic:", topic);
@@ -42,9 +41,7 @@ const getExplainedQuoteByTopic = createTool({
 
     try {
       // 🕊️ Fetch Bible verse
-      const quoteResponse = await withTimeout(
-        fetch(`https://bible-api.com/${encodeURIComponent(verseRef)}`)
-      );
+      const quoteResponse = await withTimeout(fetch(`https://bible-api.com/${encodeURIComponent(verseRef)}`));
       if (!quoteResponse.ok) throw new Error("Bible API failed");
       const quoteData = await quoteResponse.json();
       const verse = quoteData.reference;
@@ -91,8 +88,12 @@ const getExplainedQuoteByTopic = createTool({
 export const explainedQuoteAgent = new Agent({
   id: "explainedQuoteAgent",
   name: "Explained Quote Agent",
-  instructions:
-    "A helpful AI agent that takes a topic from a user, finds a relevant Bible verse, and provides an explanation.",
+  instructions: `
+You are a helpful Bible explainer agent.
+When a user asks for a verse (e.g., "give me a verse about hope"), 
+extract the key topic (e.g., "hope") and call the tool 'getExplainedQuoteByTopic' with that topic.
+Always respond with the tool's result text.
+`,
   model: {
     providerId: "openrouter",
     modelId: "gpt-4o-mini",
