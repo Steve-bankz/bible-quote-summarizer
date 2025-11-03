@@ -1,8 +1,7 @@
+import "dotenv/config";
+import { Mastra } from "@mastra/core/mastra";
 import { explainedQuoteAgent } from "./agents/explained-quote-agent.js";
 
-async function main() {
-  const result = await explainedQuoteAgent.generate("Give me a verse about hope");
-  console.log(result.text);
-}
-
-main();
+export const mastra = new Mastra({
+  agents: { explainedQuoteAgent },
+});
