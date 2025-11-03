@@ -18,20 +18,15 @@ const getExplainedQuoteByTopic = createTool({
   }),
   outputSchema: z.object({ text: z.string() }),
   execute: async (context: any) => {
-    const rawInput =
-      typeof context.input === "string" ? context.input : context.input?.topic || "";
+    // ✅ Correct way to access the topic argument in Mastra
+    const topic = context.args?.topic?.toLowerCase()?.trim();
+    console.log("🔍 User input:", context.args);
+    console.log("🔍 Extracted topic:", topic);
 
-    console.log("🔍 User input:", rawInput);
-
-    const userMessage = rawInput.toLowerCase();
-    let extractedTopic = "";
-    const parts = userMessage.split("about ");
-    if (parts.length > 1) extractedTopic = parts[1].trim();
-
-    console.log("🔍 Extracted topic:", extractedTopic);
-
-    if (!extractedTopic)
-      return { text: "Please ask for a verse with a topic, like 'a verse about hope'." };
+    if (!topic)
+      return {
+        text: "Please ask for a verse with a topic, like 'a verse about hope'.",
+      };
 
     const topicMap: Record<string, string> = {
       strength: "Philippians 4:13",
@@ -42,10 +37,11 @@ const getExplainedQuoteByTopic = createTool({
       forgiveness: "Ephesians 4:32",
     };
 
-    const verseRef = topicMap[extractedTopic];
-    if (!verseRef) return { text: `Sorry, no verse for "${extractedTopic}".` };
+    const verseRef = topicMap[topic];
+    if (!verseRef) return { text: `Sorry, no verse found for "${topic}".` };
 
     try {
+      // 🕊️ Fetch Bible verse
       const quoteResponse = await withTimeout(
         fetch(`https://bible-api.com/${encodeURIComponent(verseRef)}`)
       );
@@ -56,8 +52,11 @@ const getExplainedQuoteByTopic = createTool({
 
       const key = process.env.OPENROUTER_API_KEY;
       if (!key)
-        return { text: `Verse: ${verse}\n${text}\n(Explanation unavailable — missing API key)` };
+        return {
+          text: `Verse: ${verse}\n${text}\n(Explanation unavailable — missing API key)`,
+        };
 
+      // 🧠 Generate explanation from LLM
       const prompt = `Explain this verse briefly (1–3 sentences) in an uplifting way:\n\nVerse: ${verse}\nText: "${text}"`;
 
       const llmResponse = await withTimeout(
@@ -77,9 +76,10 @@ const getExplainedQuoteByTopic = createTool({
       if (!llmResponse.ok) throw new Error("LLM provider failed");
       const llmData = await llmResponse.json();
       const explanation =
-        llmData?.choices?.[0]?.message?.content?.trim() || "No explanation generated.";
+        llmData?.choices?.[0]?.message?.content?.trim() ||
+        "No explanation generated.";
 
-      const finalText = `Here's a verse about **${extractedTopic}**:\n\n**${verse}**\n*${text}*\n\n**Meaning:**\n${explanation}`;
+      const finalText = `Here's a verse about **${topic}**:\n\n**${verse}**\n*${text}*\n\n**Meaning:**\n${explanation}`;
       return { text: finalText };
     } catch (error: any) {
       console.error("❌ Error:", error.message);
