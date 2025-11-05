@@ -2,103 +2,90 @@ import { Mastra } from '@mastra/core/mastra';
 import { PinoLogger } from '@mastra/loggers';
 import { LibSQLStore } from '@mastra/libsql';
 import { Agent } from '@mastra/core/agent';
+import { Memory } from '@mastra/memory';
 import { createTool } from '@mastra/core/tools';
 import { z } from 'zod';
 import { registerApiRoute } from '@mastra/core/server';
 import { randomUUID } from 'crypto';
 
 const OPENROUTER_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions";
-const withTimeout = (promise, ms = 8e3) => Promise.race([
-  promise,
-  new Promise((_, reject) => setTimeout(() => reject(new Error("Timeout")), ms))
-]);
-const inputSchema = z.object({
-  topic: z.string().describe("The user's topic, e.g., 'hope', 'love', 'faith'")
-});
 const getExplainedQuoteByTopic = createTool({
   id: "getExplainedQuoteByTopic",
-  description: "Finds a relevant Bible verse and explains it.",
-  inputSchema,
+  description: "Fetches a Bible verse based on topic and returns an explanation.",
+  inputSchema: z.object({
+    userTopic: z.string().describe("Bible verse")
+  }),
   outputSchema: z.object({ text: z.string() }),
-  execute: async (context) => {
-    const topic = context.args.topic?.toLowerCase()?.trim();
-    console.log("\u{1F50D} User input:", context.args);
-    console.log("\u{1F50D} Extracted topic:", topic);
-    if (!topic) {
-      return {
-        text: "Please ask for a verse with a topic, like 'a verse about hope'."
-      };
+  execute: async ({ context }) => {
+    const topic = `${context.userTopic}`;
+    const verseResponse = await fetch(`https://bible-api.com/${encodeURIComponent(topic)}`);
+    if (!verseResponse.ok) {
+      return { text: `Failed to fetch verse for "${topic}".` };
     }
-    const topicMap = {
-      strength: "Philippians 4:13",
-      hope: "Jeremiah 29:11",
-      love: "1 Corinthians 13:4-7",
-      peace: "John 14:27",
-      faith: "Hebrews 11:1",
-      forgiveness: "Ephesians 4:32"
-    };
-    const verseRef = topicMap[topic];
-    if (!verseRef) return { text: `Sorry, no verse found for "${topic}".` };
-    try {
-      const quoteResponse = await withTimeout(
-        fetch(`https://bible-api.com/${encodeURIComponent(verseRef)}`)
-      );
-      if (!quoteResponse.ok) throw new Error("Bible API failed");
-      const quoteData = await quoteResponse.json();
-      const verse = quoteData.reference;
-      const text = quoteData.text.trim();
-      const key = process.env.OPENROUTER_API_KEY;
-      if (!key)
-        return {
-          text: `Verse: ${verse}
-${text}
-(Explanation unavailable \u2014 missing API key)`
-        };
-      const prompt = `Explain this verse briefly (1\u20133 sentences) in an uplifting way:
+    const verseData = await verseResponse.json();
+    const verseText = verseData.text?.trim() || "";
+    const reference = verseData.reference || topic;
+    const apiKey = process.env.OPENROUTER_API_KEY;
+    if (!apiKey) {
+      return { text: `Verse: ${reference}
+${verseText}
+(Explanation unavailable \u2014 missing API key)` };
+    }
+    const prompt = `Explain this Bible verse briefly (1\u20133 sentences) in an uplifting way:
 
-Verse: ${verse}
-Text: "${text}"`;
-      const llmResponse = await withTimeout(
-        fetch(OPENROUTER_ENDPOINT, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${key}`
-          },
-          body: JSON.stringify({
-            model: "gpt-4o-mini",
-            messages: [{ role: "user", content: prompt }]
-          })
-        })
-      );
-      if (!llmResponse.ok) throw new Error("LLM provider failed");
-      const llmData = await llmResponse.json();
-      const explanation = llmData?.choices?.[0]?.message?.content?.trim() || "No explanation generated.";
-      const finalText = `Here's a verse about **${topic}**:
-
-**${verse}**
-*${text}*
+Verse: ${reference}
+Text: "${verseText}"`;
+    const llmResponse = await fetch(OPENROUTER_ENDPOINT, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        messages: [{ role: "user", content: prompt }]
+      })
+    });
+    const llmData = await llmResponse.json();
+    const explanation = llmData?.choices?.[0]?.message?.content?.trim() || "No explanation available.";
+    return {
+      text: `**${reference}**
+*${verseText}*
 
 **Meaning:**
-${explanation}`;
-      return { text: finalText };
-    } catch (error) {
-      console.error("\u274C Error:", error.message);
-      return { text: "Sorry, an error occurred while processing your request." };
-    }
+${explanation}`
+    };
   }
 });
 
 const explainedQuoteAgent = new Agent({
-  id: "explainedQuoteAgent",
-  name: "Explained Quote Agent",
-  instructions: "Takes a topic and returns a Bible verse with explanation.",
+  id: "bibleSummaryAgent",
+  name: "Bible Summary Agent",
+  instructions: `
+    You are a helpful Bible assistant.
+
+    You will receive only a Bible verse or chapter reference as input,
+    for example: "John 3:16" or "Psalm 23".
+
+    Use the summarizeBibleVerseTool to:
+    - Retrieve the Bible passage text.
+    - Summarize it in 2\u20134 sentences.
+    - Return both the verse and its summary.
+
+    If the input is not a valid Bible reference, politely ask the user to provide one.
+    Keep all responses respectful and spiritually uplifting.
+  `,
   model: {
     providerId: "openrouter",
     modelId: "gpt-4o-mini",
     apiKey: process.env.OPENROUTER_API_KEY
   },
-  tools: { getExplainedQuoteByTopic }
+  tools: { getExplainedQuoteByTopic },
+  memory: new Memory({
+    storage: new LibSQLStore({
+      url: "file:../mastra.db"
+    })
+  })
 });
 
 const a2aAgentRoute = registerApiRoute("/a2a/agent/:agentId", {

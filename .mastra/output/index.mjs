@@ -8,7 +8,7 @@ import { PinoLogger } from '@mastra/loggers';
 import { LibSQLStore } from '@mastra/libsql';
 import { Agent, tryGenerateWithJsonFallback, tryStreamWithJsonFallback, MessageList, convertMessages } from '@mastra/core/agent';
 import { Memory as Memory$1 } from '@mastra/memory';
-import { getExplainedQuoteByTopic } from './tools/e4157fae-2260-48f3-8bcc-819d36b434a3.mjs';
+import { getExplainedQuoteByTopic } from './tools/5b9d8f8a-bc0a-4412-b394-507864f9e7e1.mjs';
 import { registerApiRoute } from '@mastra/core/server';
 import crypto$1, { randomUUID } from 'crypto';
 import { readdir, readFile, mkdtemp, rm, writeFile, mkdir, copyFile, stat } from 'fs/promises';

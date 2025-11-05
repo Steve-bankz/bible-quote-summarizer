@@ -10,7 +10,7 @@ import '@mastra/loggers';
 import '@mastra/libsql';
 import '@mastra/core/agent';
 import '@mastra/memory';
-import './tools/e4157fae-2260-48f3-8bcc-819d36b434a3.mjs';
+import './tools/5b9d8f8a-bc0a-4412-b394-507864f9e7e1.mjs';
 import '@mastra/core/tools';
 import '@mastra/core/server';
 import 'crypto';
